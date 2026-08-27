@@ -93,6 +93,17 @@ enum QuestionBank {
         "Trivia: What is the fastest land animal?"
     ]
 
+    private static let hardTriviaQuestions = [
+        "Trivia night: A ship sails due south from the equator for 100 miles, then due west for 100 miles, then due north for 100 miles and returns to its starting point. Where could it be?",
+        "Trivia night: Which mathematician is credited with the first published algorithm intended for a machine?",
+        "Trivia night: What is the only letter that does not appear in the name of any U.S. state?",
+        "Trivia night: Which element has the chemical symbol W, from its German name Wolfram?",
+        "Trivia night: In what year did the Berlin Wall fall?",
+        "Trivia night: What is the world’s largest desert by total area?",
+        "Trivia night: Which novel opens with the line, ‘Call me Ishmael’?",
+        "Trivia night: Which country has the most time zones when its overseas territories are included?"
+    ]
+
     static let questions: [DailyPrompt] = {
         var bank: [DailyPrompt] = []
 
@@ -119,6 +130,12 @@ enum QuestionBank {
 
     static func prompt(for date: Date = .now, birthdayPrompt: String? = nil, birthday: Date? = nil) -> DailyPrompt {
         let calendar = Calendar.current
+        let isWednesdayNight = calendar.component(.weekday, from: date) == 4
+            && calendar.component(.hour, from: date) >= 18
+        if isWednesdayNight {
+            return weeklyTrivia(for: date)
+        }
+
         if let birthday, calendar.component(.month, from: birthday) == calendar.component(.month, from: date), calendar.component(.day, from: birthday) == calendar.component(.day, from: date) {
             let custom = birthdayPrompt?.trimmingCharacters(in: .whitespacesAndNewlines)
             return DailyPrompt(id: "birthday-today", question: custom?.isEmpty == false ? custom! : bonusPrompts[0], kind: .birthday, isNewsletterFeature: false)
@@ -131,8 +148,13 @@ enum QuestionBank {
     }
 
     static func weeklyTrivia(for date: Date = .now) -> DailyPrompt {
-        let trivia = questions.filter { $0.kind == .trivia }
         let week = Calendar.current.component(.weekOfYear, from: date)
-        return trivia[week % trivia.count]
+        let question = hardTriviaQuestions[week % hardTriviaQuestions.count]
+        return DailyPrompt(
+            id: "wednesday-trivia-\(Calendar.current.component(.yearForWeekOfYear, from: date))-\(week)",
+            question: question,
+            kind: .trivia,
+            isNewsletterFeature: false
+        )
     }
 }
