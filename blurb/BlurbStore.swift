@@ -233,8 +233,15 @@ final class BlurbStore: ObservableObject {
         }
         let trimmedAnswer = answer.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedAnswer.isEmpty else { return false }
+        guard !hasAnswered(promptID: prompt.id) else {
+            errorMessage = "You've already answered today's Blurb. You can edit or delete it from the feed."
+            return false
+        }
         do {
-            let entryID = UUID().uuidString
+            // The prompt + user combination makes a second answer for the
+            // same day target the same Firestore document instead of creating
+            // a duplicate. Firestore rules reject that attempted rewrite.
+            let entryID = "\(prompt.id)_\(userID)"
             let answerRank = posts.filter { $0.promptID == prompt.id }.count + 1
             let pointsAwarded = Self.points(for: answerRank)
             var sharedValues: [String: Any] = [
