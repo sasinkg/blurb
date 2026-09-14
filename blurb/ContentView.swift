@@ -3,14 +3,13 @@ import SwiftUI
 import UIKit
 
 enum AppTab: String, CaseIterable, Identifiable {
-    case feed, groups, profile, settings
+    case home, profile, settings
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
-        case .feed: return "Feed"
-        case .groups: return "Groups"
+        case .home: return "Home"
         case .profile: return "Profile"
         case .settings: return "Settings"
         }
@@ -18,53 +17,60 @@ enum AppTab: String, CaseIterable, Identifiable {
 
     var icon: String {
         switch self {
-        case .feed: return "house.fill"
-        case .groups: return "person.3.fill"
-        case .profile: return "person.crop.circle.fill"
-        case .settings: return "gearshape.fill"
+        case .home: return "newspaper"
+        case .profile: return "person.text.rectangle"
+        case .settings: return "slider.horizontal.3"
         }
     }
 
     var dockWidth: CGFloat {
-        self == .groups ? 74 : 54
+        54
     }
 }
 
 struct ContentView: View {
     @EnvironmentObject private var auth: AuthManager
     @EnvironmentObject private var blurbStore: BlurbStore
-    @State private var showingNewPost = false
-    @State private var selectedPost: BlurbPost?
-    @State private var postToEdit: BlurbPost?
-    @State private var postToDelete: BlurbPost?
-    @State private var selectedTab: AppTab = .feed
+    @State private var selectedTab: AppTab = .home
+    @State private var showingCreateGroup = false
+    @State private var showingHomeAnswer = false
+    @State private var showingHomeAudience = false
+    @State private var homeAnswerDraft: String?
+    @State private var homeImageDraft: Data?
+    @State private var conflictingHomePost: BlurbPost?
+    @State private var conflictingGroupName = ""
+    @State private var homePostToEdit: BlurbPost?
+    @State private var startsHomeEditBlank = false
     @AppStorage("birthdayQuestionsEnabled") private var birthdayQuestionsEnabled = false
     @AppStorage("birthdayQuestion") private var birthdayQuestion = ""
     @AppStorage("birthdayTimestamp") private var birthdayTimestamp = Date.now.timeIntervalSince1970
 
     var body: some View {
         TabView(selection: $selectedTab) {
-            feedScreen
-                .tabItem { Label("Feed", systemImage: "house") }
-                .tag(AppTab.feed)
-
-            GroupsView()
-            .tabItem { Label("Groups", systemImage: "person.3") }
-            .tag(AppTab.groups)
+            homeScreen
+                .tabItem { Label("Home", systemImage: "newspaper") }
+                .tag(AppTab.home)
 
             ProfileView()
-                .tabItem { Label("Profile", systemImage: "person.crop.circle") }
+                .tabItem { Label("Profile", systemImage: "person.text.rectangle") }
                 .tag(AppTab.profile)
 
             SettingsView()
-                .tabItem { Label("Settings", systemImage: "gearshape") }
+                .tabItem { Label("Settings", systemImage: "slider.horizontal.3") }
                 .tag(AppTab.settings)
         }
-        .tint(.indigo)
+        .tint(.primary)
         .task(id: auth.user?.uid) {
             if let userID = auth.user?.uid {
                 blurbStore.start(for: userID)
             }
+        }
+        .fullScreenCover(isPresented: Binding(
+            get: { blurbStore.groupsLoaded && blurbStore.groups.isEmpty },
+            set: { _ in }
+        )) {
+            GroupOnboardingView()
+                .interactiveDismissDisabled()
         }
         .alert("Blurb", isPresented: Binding(
             get: { blurbStore.errorMessage != nil },
@@ -76,128 +82,453 @@ struct ContentView: View {
         }
     }
 
-    @ViewBuilder
-    private var selectedScreen: some View {
-        switch selectedTab {
-        case .feed:
-            feedScreen
-        case .groups:
-            GroupsView()
-        case .profile:
-            ProfileView()
-        case .settings:
-            SettingsView()
-        }
-    }
-
-    private var feedScreen: some View {
+    private var homeScreen: some View {
         NavigationStack {
             ZStack {
                 GlassBackground()
 
                 ScrollView {
-                    VStack(spacing: 22) {
-                        header
-                        dailyPromptButton
-                        feed
+                    VStack(alignment: .leading, spacing: 18) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Good morning")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                            Text("Your groups")
+                                .font(.system(size: 36, weight: .bold, design: .serif))
+                            Text("Step into a circle to answer today’s question.")
+                                .foregroundStyle(.secondary)
+                        }
+
+                        HomePromptCard(prompt: todayPrompt) {
+                            if blurbStore.groups.isEmpty {
+                                showingCreateGroup = true
+                            } else {
+                                showingHomeAnswer = true
+                            }
+                        }
+
+                        Text("YOUR CIRCLES")
+                            .font(.caption.bold())
+                            .tracking(1.2)
+                            .foregroundStyle(.secondary)
+
+                        if blurbStore.groups.isEmpty {
+                            ContentUnavailableView(
+                                "Create your first group",
+                                systemImage: "person.3.fill",
+                                description: Text("Groups are private spaces for the people you want to keep up with."))
+                                .padding(.vertical, 48)
+                        } else {
+                            ForEach(blurbStore.groups) { group in
+                                NavigationLink(value: group) {
+                                    HomeGroupCard(group: group)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
                     }
-                    .padding(.top)
+                    .padding()
                 }
             }
-            .sheet(isPresented: $showingNewPost) {
-                NewPostView(prompt: todayPrompt.question, initialAnswer: nil) { answer in
-                    await blurbStore.createPost(answer: answer, prompt: todayPrompt)
-                }
-                .presentationBackground(.ultraThinMaterial)
+            .navigationDestination(for: BlurbGroup.self) { group in
+                GroupFeedView(group: group)
             }
-            .sheet(item: $postToEdit) { post in
-                NewPostView(prompt: post.prompt, initialAnswer: post.answer) { answer in
-                    await blurbStore.editPost(post, answer: answer)
+            .navigationTitle("Home")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button { showingCreateGroup = true } label: {
+                        Image(systemName: "square.and.pencil")
+                    }
+                    .accessibilityLabel("Create group")
                 }
-                .presentationBackground(.ultraThinMaterial)
             }
-            .sheet(item: $selectedPost) { post in
-                CommentsView(post: post)
+            .sheet(isPresented: $showingCreateGroup) {
+                CreateGroupView()
                     .presentationBackground(.ultraThinMaterial)
             }
+            .sheet(isPresented: $showingHomeAnswer, onDismiss: offerHomeAudience) {
+                NewPostView(
+                    prompt: todayPrompt.question,
+                    initialAnswer: nil,
+                    themeSeed: todayPrompt.id,
+                    requiresPhoto: todayPrompt.requiresPhoto
+                ) { answer, imageData in
+                    homeAnswerDraft = answer
+                    homeImageDraft = imageData
+                    return true
+                }
+                .presentationBackground(.ultraThinMaterial)
+            }
+            .sheet(item: $homePostToEdit) { post in
+                NewPostView(
+                    prompt: post.prompt,
+                    initialAnswer: startsHomeEditBlank ? nil : post.answer,
+                    themeSeed: conflictingGroupName
+                ) { answer, _ in
+                    let saved = await blurbStore.editPost(post, answer: answer)
+                    if saved { clearHomeDraft() }
+                    return saved
+                }
+                .presentationBackground(.ultraThinMaterial)
+            }
+            .confirmationDialog("Where should this answer go?", isPresented: $showingHomeAudience, titleVisibility: .visible) {
+                Button("All groups") { postHomeAnswer(to: blurbStore.groups) }
+                ForEach(blurbStore.groups) { group in
+                    Button(group.name) { postHomeAnswer(to: [group]) }
+                }
+                Button("Cancel", role: .cancel) { clearHomeDraft() }
+            } message: {
+                Text("Share the same answer everywhere, or keep it to one group.")
+            }
             .confirmationDialog(
-                "Delete this answer?",
+                "You already answered in \(conflictingGroupName)",
                 isPresented: Binding(
-                    get: { postToDelete != nil },
-                    set: { if !$0 { postToDelete = nil } }
+                    get: { conflictingHomePost != nil },
+                    set: { if !$0 { conflictingHomePost = nil } }
                 ),
                 titleVisibility: .visible
             ) {
-                Button("Delete answer", role: .destructive) {
-                    guard let postToDelete else { return }
-                    Task { await blurbStore.deletePost(postToDelete) }
-                    self.postToDelete = nil
+                Button("Edit existing answer") { openConflictingAnswer(blank: false) }
+                Button("Write a new answer") { openConflictingAnswer(blank: true) }
+                Button("Choose another group", role: .cancel) {
+                    conflictingHomePost = nil
+                    showingHomeAudience = true
                 }
-                Button("Keep answer", role: .cancel) { postToDelete = nil }
             } message: {
-                Text("This removes your answer from every group where you posted it.")
+                Text("Each group can have one answer per day. You can revise the answer that’s already there.")
+            }
+            .task(id: todayPrompt.id) {
+                blurbStore.listenForAnswerCounts(promptID: todayPrompt.id)
             }
         }
     }
 
-    private var header: some View {
-        HStack {
-            VStack(alignment: .leading, spacing: 3) {
-                Text("Good morning")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-
-                Text(blurbStore.selectedGroup?.name ?? "Your groups")
-                    .font(.title.bold())
-            }
-
-            Spacer()
-
-            Image(systemName: "bookmark.fill")
-                .foregroundStyle(.indigo)
-                .padding(12)
-                .background(.thinMaterial, in: Circle())
-        }
-        .padding(.horizontal)
+    private var todayPrompt: DailyPrompt {
+        QuestionBank.prompt(
+            birthdayPrompt: birthdayQuestion,
+            birthday: birthdayQuestionsEnabled ? Date(timeIntervalSince1970: birthdayTimestamp) : nil
+        )
     }
 
-    private var dailyPromptButton: some View {
-        VStack(spacing: 12) {
-            Button {
-                showingNewPost = true
-            } label: {
-                HStack(spacing: 16) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text(todayPrompt.kind == .trivia
-                             ? "WEDNESDAY TRIVIA"
-                             : (todayPrompt.isNewsletterFeature ? "NEWSLETTER BLURB" : "TODAY'S BLURB"))
-                            .font(.caption.bold())
-                            .tracking(1)
-                            .opacity(0.8)
+    private func offerHomeAudience() {
+        guard homeAnswerDraft != nil || homeImageDraft != nil else { return }
+        showingHomeAudience = true
+    }
 
-                        Text(todayPrompt.question)
-                            .font(.title3.bold())
-                            .multilineTextAlignment(.leading)
+    private func postHomeAnswer(to groups: [BlurbGroup]) {
+        guard let answer = homeAnswerDraft else { return }
+        let imageData = homeImageDraft
+        Task {
+            for group in groups {
+                if let existing = await blurbStore.existingAnswer(promptID: todayPrompt.id, in: group.id) {
+                    conflictingGroupName = group.name
+                    conflictingHomePost = existing
+                    return
+                }
+            }
+
+            for group in groups {
+                _ = await blurbStore.createPost(
+                    answer: answer,
+                    imageData: imageData,
+                    prompt: todayPrompt,
+                    in: group.id
+                )
+            }
+            clearHomeDraft()
+        }
+    }
+
+    private func clearHomeDraft() {
+        homeAnswerDraft = nil
+        homeImageDraft = nil
+    }
+
+    private func openConflictingAnswer(blank: Bool) {
+        guard let conflictingHomePost else { return }
+        startsHomeEditBlank = blank
+        homePostToEdit = conflictingHomePost
+        self.conflictingHomePost = nil
+    }
+}
+
+private struct HomePromptCard: View {
+    @Environment(\.colorScheme) private var colorScheme
+    let prompt: DailyPrompt
+    let action: () -> Void
+
+    private var accent: Color {
+        colorScheme == .dark
+            ? Color(red: 1, green: 0.78, blue: 0.02)
+            : Color(red: 0.78, green: 0.56, blue: 0.02)
+    }
+
+    private var ruleColor: Color {
+        colorScheme == .dark ? Color.white.opacity(0.16) : .black
+    }
+
+    var body: some View {
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 12) {
+            Text("THE DAILY BLURB")
+                .font(.caption.weight(.black))
+                .tracking(2)
+                .foregroundStyle(.black)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 5)
+                .background(accent)
+
+            Text(Date.now.formatted(.dateTime.weekday(.wide).month(.wide).day()))
+                .font(.caption)
+                .textCase(.uppercase)
+                .tracking(0.8)
+
+            Divider().overlay(Color.primary.opacity(0.35))
+
+            Text(prompt.question)
+                .font(.system(size: 28, weight: .bold, design: .serif))
+                .fixedSize(horizontal: false, vertical: true)
+                HStack {
+                    Text("Tap to answer")
+                        .font(.caption.bold())
+                    Spacer()
+                    Image(systemName: "square.and.pencil")
+                }
+                .foregroundStyle(.secondary)
+            }
+            .foregroundStyle(.primary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(18)
+            .background { VibrantCardBackground(seed: prompt.id) }
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay { RoundedRectangle(cornerRadius: 8).stroke(ruleColor, lineWidth: 2) }
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct HomeGroupCard: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @EnvironmentObject private var blurbStore: BlurbStore
+    let group: BlurbGroup
+
+    private var accent: Color {
+        colorScheme == .dark
+            ? Color(red: 1, green: 0.78, blue: 0.02)
+            : Color(red: 0.78, green: 0.56, blue: 0.02)
+    }
+
+    private var ruleColor: Color {
+        colorScheme == .dark ? Color.white.opacity(0.16) : .black
+    }
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            VibrantCardBackground(seed: group.name)
+
+            VStack(alignment: .leading, spacing: 0) {
+                Text(group.name)
+                    .font(.system(size: 18, weight: .black, design: .serif))
+                    .foregroundStyle(.black)
+                    .textCase(.uppercase)
+                    .tracking(0.7)
+                    .multilineTextAlignment(.leading)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.78)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 5)
+                    .background(accent)
+
+                Divider()
+                    .overlay(Color.primary.opacity(0.35))
+                    .padding(.top, 7)
+                    .padding(.bottom, 10)
+
+                HStack(alignment: .bottom) {
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("\(blurbStore.answerCount(in: group.id))/\(group.memberCount)")
+                            .font(.title.bold())
+                        Text("answered today")
+                            .font(.subheadline.weight(.medium))
                     }
 
                     Spacer()
 
-                    Image(systemName: "arrow.right")
+                    Image(systemName: "arrow.up.right")
+                        .font(.title3.bold())
+                        .frame(width: 44, height: 44)
+                        .background(
+                            colorScheme == .dark
+                                ? Color(red: 1, green: 0.78, blue: 0.02)
+                                : Color(red: 0.78, green: 0.56, blue: 0.02),
+                            in: Circle()
+                        )
+                        .foregroundStyle(.black)
+                }
+                .foregroundStyle(.primary)
+            }
+            .padding(17)
+        }
+        .frame(height: 142)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay { RoundedRectangle(cornerRadius: 8).stroke(ruleColor, lineWidth: 2) }
+    }
+}
+
+private struct VibrantCardBackground: View {
+    @Environment(\.colorScheme) private var colorScheme
+    let seed: String
+
+    var body: some View {
+        ZStack {
+            colorScheme == .dark
+                ? Color(red: 0.14, green: 0.14, blue: 0.14)
+                : Color(red: 0.985, green: 0.975, blue: 0.93)
+            Rectangle()
+                .fill(
+                    colorScheme == .dark
+                        ? Color(red: 1, green: 0.78, blue: 0.02)
+                        : Color(red: 0.78, green: 0.56, blue: 0.02)
+                )
+                .frame(width: 12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            VStack(spacing: 5) {
+                ForEach(0..<14, id: \.self) { _ in
+                    Rectangle()
+                        .fill(colorScheme == .dark ? .white.opacity(0.035) : .black.opacity(0.035))
+                        .frame(height: 1)
+                }
+            }
+        }
+    }
+}
+
+private struct GroupFeedView: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @EnvironmentObject private var auth: AuthManager
+    @EnvironmentObject private var blurbStore: BlurbStore
+    @State private var showingNewPost = false
+    @State private var selectedPost: BlurbPost?
+    @State private var postToEdit: BlurbPost?
+    @State private var postToDelete: BlurbPost?
+    @State private var answerToReuse: String?
+    @State private var imageToReuse: Data?
+    @State private var showingReuseOptions = false
+    @AppStorage("birthdayQuestionsEnabled") private var birthdayQuestionsEnabled = false
+    @AppStorage("birthdayQuestion") private var birthdayQuestion = ""
+    @AppStorage("birthdayTimestamp") private var birthdayTimestamp = Date.now.timeIntervalSince1970
+    let group: BlurbGroup
+
+    var body: some View {
+        ZStack {
+            GlassBackground()
+            ScrollView {
+                VStack(spacing: 22) {
+                    Text(group.name)
+                        .font(.system(size: 38, weight: .bold, design: .serif))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal)
+                    promptCard
+                    feed
+                }
+                .padding(.vertical)
+            }
+        }
+        .navigationTitle("")
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear { blurbStore.select(group) }
+        .sheet(isPresented: $showingNewPost, onDismiss: offerReuseIfAvailable) {
+            NewPostView(
+                prompt: todayPrompt.question,
+                initialAnswer: nil,
+                themeSeed: group.name,
+                requiresPhoto: todayPrompt.requiresPhoto
+            ) { answer, imageData in
+                let posted = await blurbStore.createPost(answer: answer, imageData: imageData, prompt: todayPrompt, in: group.id)
+                if posted {
+                    answerToReuse = answer
+                    imageToReuse = imageData
+                }
+                return posted
+            }
+            .presentationBackground(.ultraThinMaterial)
+        }
+        .sheet(item: $postToEdit) { post in
+            NewPostView(prompt: post.prompt, initialAnswer: post.answer, themeSeed: group.name) { answer, _ in
+                await blurbStore.editPost(post, answer: answer)
+            }
+            .presentationBackground(.ultraThinMaterial)
+        }
+        .sheet(item: $selectedPost) { post in
+            CommentsView(post: post)
+                .presentationBackground(.ultraThinMaterial)
+        }
+        .confirmationDialog("Use this answer in another group?", isPresented: $showingReuseOptions, titleVisibility: .visible) {
+            ForEach(otherGroups) { destination in
+                Button(destination.name) { reuseAnswer(in: destination) }
+            }
+            Button("Not now", role: .cancel) { answerToReuse = nil }
+        } message: {
+            Text("You can reuse the same answer, or open another group later and write something different.")
+        }
+        .confirmationDialog(
+            "Delete this answer from \(group.name)?",
+            isPresented: Binding(
+                get: { postToDelete != nil },
+                set: { if !$0 { postToDelete = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Delete answer", role: .destructive) {
+                guard let postToDelete else { return }
+                Task { await blurbStore.deletePost(postToDelete) }
+                self.postToDelete = nil
+            }
+            Button("Keep answer", role: .cancel) { postToDelete = nil }
+        } message: {
+            Text("Answers in your other groups won’t be changed.")
+        }
+    }
+
+    private var promptCard: some View {
+        VStack(spacing: 12) {
+            Button { showingNewPost = true } label: {
+                HStack(spacing: 16) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(todayPrompt.kind == .trivia ? "WEDNESDAY TRIVIA" : "TODAY'S BLURB")
+                            .font(.caption.bold())
+                            .tracking(1)
+                            .opacity(0.8)
+                        Text(todayPrompt.question)
+                            .font(.system(size: 24, weight: .bold, design: .serif))
+                            .multilineTextAlignment(.leading)
+                    }
+                    Spacer()
+                    Image(systemName: blurbStore.hasAnswered(promptID: todayPrompt.id, in: group.id) ? "checkmark" : "arrow.right")
                         .font(.title3.bold())
                         .padding(14)
-                        .background(.white.opacity(0.22), in: Circle())
+                        .background(
+                            colorScheme == .dark
+                                ? Color(red: 1, green: 0.78, blue: 0.02)
+                                : Color(red: 0.78, green: 0.56, blue: 0.02),
+                            in: Circle()
+                        )
+                        .foregroundStyle(.black)
                 }
-                .foregroundStyle(.white)
-                .padding(22)
-                .background(
-                    LinearGradient(colors: [.indigo, .purple, .blue], startPoint: .topLeading, endPoint: .bottomTrailing),
-                    in: RoundedRectangle(cornerRadius: 26)
-                )
-                .shadow(color: .indigo.opacity(0.35), radius: 18, y: 10)
+                .foregroundStyle(.primary)
+                .padding(18)
+                .background { VibrantCardBackground(seed: group.name) }
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(colorScheme == .dark ? Color.white.opacity(0.16) : .black, lineWidth: 2)
+                }
             }
-            .disabled(blurbStore.selectedGroup == nil)
+            .disabled(blurbStore.hasAnswered(promptID: todayPrompt.id, in: group.id))
 
-            if let answer = blurbStore.answer(for: todayPrompt.id), blurbStore.posts.first?.id != answer.id {
+            if let answer = blurbStore.answer(for: todayPrompt.id, in: group.id),
+               blurbStore.posts.first?.id != answer.id {
                 TodayAnswerCard(answer: answer)
             }
         }
@@ -206,29 +537,22 @@ struct ContentView: View {
 
     private var feed: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("RECENT BLURBS")
+            Text("TODAY IN \(group.name.uppercased())")
                 .font(.caption.bold())
                 .tracking(1)
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, 4)
 
-            if blurbStore.selectedGroup == nil {
-                ContentUnavailableView(
-                    "Create your first group",
-                    systemImage: "person.3.fill",
-                    description: Text("Groups are private spaces for the people you want to keep up with."))
-                    .padding(.vertical, 48)
-            } else if !blurbStore.hasAnswered(promptID: todayPrompt.id) {
+            if !blurbStore.hasAnswered(promptID: todayPrompt.id, in: group.id) {
                 ContentUnavailableView(
                     "Answer to unlock the group",
                     systemImage: "lock.fill",
-                    description: Text("Post your answer to today’s Blurb before seeing anyone else’s."))
+                    description: Text("Post your answer here before seeing this group’s conversation."))
                     .padding(.vertical, 48)
             } else {
-                ForEach(blurbStore.posts) { post in
+                ForEach(blurbStore.posts.filter { $0.promptID == todayPrompt.id }) { post in
                     PostCard(
                         post: post,
-                        groupName: blurbStore.selectedGroup?.name ?? "Blurb",
                         currentUserID: auth.user?.uid,
                         toggleLike: { Task { await blurbStore.toggleLike(post) } },
                         editAnswer: post.authorID == auth.user?.uid && post.editCount == 0 ? { postToEdit = post } : nil,
@@ -241,6 +565,10 @@ struct ContentView: View {
         .padding(.horizontal)
     }
 
+    private var otherGroups: [BlurbGroup] {
+        blurbStore.groups.filter { $0.id != group.id }
+    }
+
     private var todayPrompt: DailyPrompt {
         QuestionBank.prompt(
             birthdayPrompt: birthdayQuestion,
@@ -248,12 +576,29 @@ struct ContentView: View {
         )
     }
 
+    private func offerReuseIfAvailable() {
+        guard answerToReuse != nil, !otherGroups.isEmpty else { return }
+        showingReuseOptions = true
+    }
+
+    private func reuseAnswer(in destination: BlurbGroup) {
+        guard let answerToReuse else { return }
+        Task {
+            _ = await blurbStore.createPost(
+                answer: answerToReuse,
+                imageData: imageToReuse,
+                prompt: todayPrompt,
+                in: destination.id
+            )
+            self.answerToReuse = nil
+            self.imageToReuse = nil
+        }
+    }
 }
 
 struct PostCard: View {
     @Environment(\.colorScheme) private var colorScheme
     let post: BlurbPost
-    let groupName: String
     let currentUserID: String?
     let toggleLike: () -> Void
     let editAnswer: (() -> Void)?
@@ -275,8 +620,17 @@ struct PostCard: View {
                 .clipShape(Circle())
 
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("\(post.authorName) in \(groupName)")
-                        .font(.headline)
+                    HStack(spacing: 7) {
+                        Text(post.authorName)
+                            .font(.headline)
+
+                        if let rankColor {
+                            Image(systemName: "medal.fill")
+                                .font(.caption)
+                                .foregroundStyle(rankColor)
+                                .accessibilityLabel(post.placementLabel ?? "Ranked answer")
+                        }
+                    }
 
                     Text(post.timeLabel)
                         .font(.subheadline)
@@ -305,20 +659,20 @@ struct PostCard: View {
 
             Divider().opacity(0.5)
 
-            Text(post.prompt)
-                .font(.caption.bold())
-                .foregroundStyle(.indigo)
-
             Text(post.answer)
                 .font(.body)
 
-            if let placementLabel = post.placementLabel {
-                Label(placementLabel, systemImage: "trophy.fill")
-                    .font(.caption.bold())
-                    .foregroundStyle(.orange)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background(.orange.opacity(0.12), in: Capsule())
+            if let imageURL = post.imageURL {
+                AsyncImage(url: URL(string: imageURL)) { image in
+                    image
+                        .resizable()
+                        .scaledToFill()
+                } placeholder: {
+                    ProgressView()
+                        .frame(maxWidth: .infinity, minHeight: 180)
+                }
+                .frame(maxWidth: .infinity, minHeight: 220, maxHeight: 300)
+                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
             }
 
             HStack(spacing: 18) {
@@ -338,18 +692,27 @@ struct PostCard: View {
             }
         }
         .padding(18)
-        .background(cardFill, in: RoundedRectangle(cornerRadius: 24))
+        .background(cardFill, in: RoundedRectangle(cornerRadius: 7))
         .overlay {
-            RoundedRectangle(cornerRadius: 24)
-                .stroke(colorScheme == .dark ? .white.opacity(0.14) : .white.opacity(0.35), lineWidth: 1)
+            RoundedRectangle(cornerRadius: 7)
+                .stroke(colorScheme == .dark ? Color.white.opacity(0.14) : .black, lineWidth: 1.5)
         }
-        .shadow(color: .black.opacity(colorScheme == .dark ? 0.28 : 0.08), radius: 14, y: 7)
+        .shadow(color: .black.opacity(colorScheme == .dark ? 0.28 : 0.06), radius: 4, y: 2)
     }
 
     private var cardFill: Color {
         colorScheme == .dark
-            ? Color(red: 0.075, green: 0.08, blue: 0.13)
-            : Color.white.opacity(0.82)
+            ? Color(red: 0.14, green: 0.14, blue: 0.14)
+            : Color(red: 0.995, green: 0.99, blue: 0.96)
+    }
+
+    private var rankColor: Color? {
+        switch post.answerRank {
+        case 1: return Color(red: 0.92, green: 0.68, blue: 0.05)
+        case 2: return Color.gray
+        case 3: return Color(red: 0.65, green: 0.38, blue: 0.18)
+        default: return nil
+        }
     }
 }
 
@@ -366,16 +729,7 @@ private struct TodayAnswerCard: View {
                 Text("+\(answer.pointsAwarded) pts")
                     .font(.caption.bold())
             }
-            .foregroundStyle(.indigo)
-
-            if let placementLabel = answer.placementLabel {
-                Label(placementLabel, systemImage: "trophy.fill")
-                    .font(.caption.bold())
-                    .foregroundStyle(.orange)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background(.orange.opacity(0.12), in: Capsule())
-            }
+            .foregroundStyle(.primary)
 
             Text(answer.answer)
                 .font(.body.weight(.medium))
@@ -471,16 +825,29 @@ private struct GrowingAnswerField: UIViewRepresentable {
 
 struct NewPostView: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.colorScheme) private var colorScheme
     @State private var answer: String
     @State private var isSubmitting = false
     @State private var composerHeight: CGFloat = 58
+    @State private var photoItem: PhotosPickerItem?
+    @State private var photoData: Data?
     let prompt: String
     let initialAnswer: String?
-    let onPost: (String) async -> Bool
+    let themeSeed: String
+    let requiresPhoto: Bool
+    let onPost: (String, Data?) async -> Bool
 
-    init(prompt: String, initialAnswer: String?, onPost: @escaping (String) async -> Bool) {
+    init(
+        prompt: String,
+        initialAnswer: String?,
+        themeSeed: String,
+        requiresPhoto: Bool = false,
+        onPost: @escaping (String, Data?) async -> Bool
+    ) {
         self.prompt = prompt
         self.initialAnswer = initialAnswer
+        self.themeSeed = themeSeed
+        self.requiresPhoto = requiresPhoto
         self.onPost = onPost
         _answer = State(initialValue: initialAnswer ?? "")
     }
@@ -492,19 +859,28 @@ struct NewPostView: View {
 
                 VStack(spacing: 20) {
                     Text(prompt)
-                        .font(.system(size: 27, weight: .bold, design: .rounded))
-                        .foregroundStyle(.white)
+                        .font(.system(size: 27, weight: .bold, design: .serif))
+                        .foregroundStyle(.primary)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .frame(height: promptHeight, alignment: .leading)
                         .padding(22)
-                        .background(
-                            LinearGradient(
-                                colors: [.indigo, .purple],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            ),
-                            in: RoundedRectangle(cornerRadius: 26)
-                        )
+                        .background { VibrantCardBackground(seed: themeSeed) }
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(colorScheme == .dark ? Color.white.opacity(0.16) : .black, lineWidth: 2)
+                        }
+
+                    if requiresPhoto {
+                        PhotosPicker(selection: $photoItem, matching: .images) {
+                            Label(photoData == nil ? "Choose a photo" : "Change photo", systemImage: "photo.on.rectangle")
+                                .font(.headline)
+                                .foregroundStyle(.primary)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 15)
+                                .background(Color.black.opacity(0.06), in: Capsule())
+                        }
+                    }
 
                     HStack(alignment: .top, spacing: 10) {
                         ZStack(alignment: .leading) {
@@ -536,15 +912,15 @@ struct NewPostView: View {
                                         .font(.headline.weight(.bold))
                                 }
                             }
-                            .foregroundStyle(.white)
+                            .foregroundStyle(Color(red: 1, green: 0.78, blue: 0.02))
                             // Keep the control a soft square initially, then
                             // grow it vertically with the answer field.
                             .frame(width: 58, height: composerHeight, alignment: .center)
                             .background(
-                                .indigo.gradient,
+                                .black.gradient,
                                 in: RoundedRectangle(cornerRadius: 28, style: .continuous)
                             )
-                            .shadow(color: .indigo.opacity(0.25), radius: 8, y: 4)
+                            .shadow(color: .black.opacity(0.16), radius: 5, y: 3)
                         }
                         .disabled(!canSubmit)
                         .opacity(canSubmit ? 1 : 0.36)
@@ -579,6 +955,9 @@ struct NewPostView: View {
                     }
                 }
             }
+            .onChange(of: photoItem) { _, item in
+                Task { photoData = try? await item?.loadTransferable(type: Data.self) }
+            }
         }
     }
 
@@ -587,15 +966,16 @@ struct NewPostView: View {
     }
 
     private var canSubmit: Bool {
-        !isSubmitting && !answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        !isSubmitting
+            && (!answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || (requiresPhoto && photoData != nil))
     }
 
     private func submitAnswer() {
         let trimmedAnswer = answer.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedAnswer.isEmpty, !isSubmitting else { return }
+        guard (!trimmedAnswer.isEmpty || (requiresPhoto && photoData != nil)), !isSubmitting else { return }
         isSubmitting = true
         Task {
-            if await onPost(trimmedAnswer) { dismiss() }
+            if await onPost(trimmedAnswer, photoData) { dismiss() }
             isSubmitting = false
         }
     }
@@ -741,7 +1121,7 @@ struct GroupCard: View {
                 .font(.title2)
                 .foregroundStyle(.white)
                 .frame(width: 44, height: 44)
-                .background(.indigo, in: RoundedRectangle(cornerRadius: 13))
+                .background(.black, in: RoundedRectangle(cornerRadius: 13))
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(group.name)
@@ -757,14 +1137,14 @@ struct GroupCard: View {
 
             if isSelected {
                 Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(.indigo)
+                    .foregroundStyle(.black)
             }
         }
         .padding(13)
         .background(Color.black.opacity(0.03), in: RoundedRectangle(cornerRadius: 16))
         .overlay {
             RoundedRectangle(cornerRadius: 16)
-                .stroke(isSelected ? Color.indigo : .clear, lineWidth: 2)
+                .stroke(isSelected ? Color.black : .clear, lineWidth: 2)
         }
     }
 }
@@ -920,6 +1300,7 @@ struct FloatingDock: View {
 }
 
 struct ProfileView: View {
+    @Environment(\.colorScheme) private var colorScheme
     @EnvironmentObject private var auth: AuthManager
     @EnvironmentObject private var blurbStore: BlurbStore
     private let nextReportDate = Calendar.current.date(byAdding: .day, value: 3, to: Calendar.current.date(byAdding: .month, value: 1, to: Date.now) ?? .now) ?? .now
@@ -954,25 +1335,40 @@ struct ProfileView: View {
                         }
 
                         VStack(alignment: .leading, spacing: 12) {
-                            Text("BADGES")
-                                .font(.caption.bold())
-                                .tracking(1)
-                                .foregroundStyle(.secondary)
+                            HStack {
+                                Text("THE BADGE EDITION")
+                                    .font(.caption.weight(.black))
+                                    .tracking(1.4)
+                                    .foregroundStyle(.black)
+                                    .padding(.horizontal, 9)
+                                    .padding(.vertical, 5)
+                                    .background(Color(red: 1, green: 0.78, blue: 0.02))
+                                Spacer()
+                                Text("ACHIEVEMENTS")
+                                    .font(.caption2.bold())
+                                    .tracking(0.8)
+                                    .foregroundStyle(.secondary)
+                            }
 
-                            BadgeRow(icon: "flame.fill", color: .orange, title: "On a roll", subtitle: "Answer 7 daily blurbs in a row")
-                            BadgeRow(icon: "brain.head.profile", color: .purple, title: "Trivia ace", subtitle: "Get 5 weekly trivia answers right")
-                            BadgeRow(icon: "person.3.fill", color: .blue, title: "Group regular", subtitle: "Share with a group 10 times")
+                            Divider().overlay(Color.primary.opacity(0.35))
+
+                            BadgeRow(icon: "flame.fill", title: "On a roll", subtitle: "Answer 7 daily blurbs in a row")
+                            BadgeRow(icon: "brain.head.profile", title: "Trivia ace", subtitle: "Get 5 weekly trivia answers right")
+                            BadgeRow(icon: "person.3.fill", title: "Group regular", subtitle: "Share with a group 10 times")
                             if let winner = blurbStore.lastMonthWinner {
                                 BadgeRow(
                                     icon: "crown.fill",
-                                    color: .yellow,
                                     title: winner.title,
                                     subtitle: "Finished first in your group with \(winner.points) points"
                                 )
                             }
                         }
                         .padding(18)
-                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22))
+                        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 6))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 6)
+                                .stroke(colorScheme == .dark ? Color.white.opacity(0.16) : .black, lineWidth: 1.5)
+                        }
 
                         VStack(alignment: .leading, spacing: 10) {
                             Label("Monthly report", systemImage: "sparkles.rectangle.stack")
@@ -1108,31 +1504,60 @@ struct StatCard: View {
 }
 
 struct BadgeRow: View {
+    @Environment(\.colorScheme) private var colorScheme
     let icon: String
-    let color: Color
     let title: String
     let subtitle: String
 
     var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: icon)
-                .foregroundStyle(.white)
-                .frame(width: 38, height: 38)
-                .background(color.gradient, in: Circle())
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.subheadline.bold())
-                Text(subtitle).font(.caption).foregroundStyle(.secondary)
+        HStack(spacing: 13) {
+            ZStack {
+                Rectangle()
+                    .fill(Color(red: 1, green: 0.78, blue: 0.02))
+                Image(systemName: icon)
+                    .font(.system(size: 18, weight: .black))
+                    .foregroundStyle(.black)
             }
+            .frame(width: 43, height: 43)
+            .overlay { Rectangle().stroke(.black, lineWidth: 1.5) }
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text("MILESTONE")
+                    .font(.system(size: 9, weight: .black))
+                    .tracking(1.2)
+                    .foregroundStyle(.secondary)
+                Text(title)
+                    .font(.system(.headline, design: .serif).bold())
+                Text(subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Spacer()
-            Image(systemName: "lock.fill").font(.caption).foregroundStyle(.secondary)
+            Image(systemName: "lock.fill")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.vertical, 10)
+        .padding(.horizontal, 11)
+        .background(Color.primary.opacity(0.035))
+        .overlay {
+            Rectangle()
+                .stroke(colorScheme == .dark ? Color.white.opacity(0.14) : .black.opacity(0.45), lineWidth: 1)
         }
     }
 }
 
 struct SettingsView: View {
+    @EnvironmentObject private var blurbStore: BlurbStore
     @AppStorage("dailyReminderEnabled") private var dailyReminderEnabled = true
     @AppStorage("weeklyTriviaEnabled") private var weeklyTriviaEnabled = true
     @AppStorage("monthlyReportEnabled") private var monthlyReportEnabled = true
+    @AppStorage("appAppearance") private var appAppearance = AppAppearance.system.rawValue
+    @State private var groupToRename: BlurbGroup?
+    @State private var showingCreateGroup = false
+    @State private var showingJoinGroup = false
+    @State private var copiedGroupName: String?
 
     var body: some View {
         NavigationStack {
@@ -1142,7 +1567,46 @@ struct SettingsView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 18) {
                         Text("Settings")
-                            .font(.title.bold())
+                            .font(.system(size: 36, weight: .bold, design: .serif))
+
+                        settingsCard(title: "APPEARANCE") {
+                            Picker("Theme", selection: $appAppearance) {
+                                ForEach(AppAppearance.allCases) { appearance in
+                                    Text(appearance.label).tag(appearance.rawValue)
+                                }
+                            }
+                            .pickerStyle(.segmented)
+                        }
+
+                        settingsCard(title: "GROUPS") {
+                            if blurbStore.groups.isEmpty {
+                                Text("You haven’t joined any groups yet.")
+                                    .foregroundStyle(.secondary)
+                            } else {
+                                ForEach(blurbStore.groups) { group in
+                                    SettingsGroupRow(
+                                        group: group,
+                                        canEdit: blurbStore.canEdit(group),
+                                        copyLink: {
+                                            UIPasteboard.general.string = "https://blurb.app/join/\(group.inviteCode)"
+                                            copiedGroupName = group.name
+                                        },
+                                        edit: { groupToRename = group }
+                                    )
+                                }
+                            }
+
+                            HStack {
+                                Button { showingCreateGroup = true } label: {
+                                    Label("New group", systemImage: "plus")
+                                }
+                                Spacer()
+                                Button { showingJoinGroup = true } label: {
+                                    Label("Join with code", systemImage: "number")
+                                }
+                            }
+                            .font(.subheadline.bold())
+                        }
 
                         settingsCard(title: "REMINDERS") {
                             Toggle("Daily Blurb reminder", isOn: $dailyReminderEnabled)
@@ -1165,6 +1629,26 @@ struct SettingsView: View {
                     .padding()
                 }
             }
+            .sheet(isPresented: $showingCreateGroup) {
+                CreateGroupView()
+                    .presentationBackground(.ultraThinMaterial)
+            }
+            .sheet(isPresented: $showingJoinGroup) {
+                JoinGroupView()
+                    .presentationBackground(.ultraThinMaterial)
+            }
+            .sheet(item: $groupToRename) { group in
+                RenameGroupView(group: group)
+                    .presentationBackground(.ultraThinMaterial)
+            }
+            .alert("Link copied", isPresented: Binding(
+                get: { copiedGroupName != nil },
+                set: { if !$0 { copiedGroupName = nil } }
+            )) {
+                Button("OK", role: .cancel) { copiedGroupName = nil }
+            } message: {
+                Text("The invite link for \(copiedGroupName ?? "this group") is ready to share.")
+            }
         }
     }
 
@@ -1181,25 +1665,207 @@ struct SettingsView: View {
     }
 }
 
+private struct SettingsGroupRow: View {
+    let group: BlurbGroup
+    let canEdit: Bool
+    let copyLink: () -> Void
+    let edit: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(group.name)
+                    .font(.system(.headline, design: .serif).bold())
+                Text("Code: \(group.inviteCode)")
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button(action: copyLink) {
+                Image(systemName: "link")
+                    .frame(width: 34, height: 34)
+            }
+            .buttonStyle(.bordered)
+            .accessibilityLabel("Copy invite link for \(group.name)")
+
+            Button(action: edit) {
+                Image(systemName: "pencil")
+                    .frame(width: 34, height: 34)
+            }
+            .buttonStyle(.bordered)
+            .disabled(!canEdit)
+            .accessibilityLabel("Rename \(group.name)")
+        }
+        .padding(.vertical, 6)
+    }
+}
+
+private struct JoinGroupView: View {
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var blurbStore: BlurbStore
+    @State private var code = ""
+    @State private var isJoining = false
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("INVITE CODE") {
+                    TextField("ABC123", text: $code)
+                        .textInputAutocapitalization(.characters)
+                        .autocorrectionDisabled()
+                }
+            }
+            .navigationTitle("Join a group")
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button(isJoining ? "Joining…" : "Join") {
+                        isJoining = true
+                        Task {
+                            if await blurbStore.joinGroup(with: code) { dismiss() }
+                            isJoining = false
+                        }
+                    }
+                    .disabled(code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isJoining)
+                }
+            }
+        }
+    }
+}
+
+private struct GroupOnboardingView: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @EnvironmentObject private var auth: AuthManager
+    @State private var showingCreateGroup = false
+    @State private var showingJoinGroup = false
+
+    var body: some View {
+        ZStack {
+            GlassBackground()
+
+            VStack(alignment: .leading, spacing: 22) {
+                Text("YOU’RE IN")
+                    .font(.caption.weight(.black))
+                    .tracking(2)
+                    .foregroundStyle(.black)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(Color(red: 1, green: 0.78, blue: 0.02))
+
+                Text("Find your people.")
+                    .font(.system(size: 42, weight: .bold, design: .serif))
+
+                Text("Blurb happens inside private groups. Start a new circle or use an invite code to join one.")
+                    .font(.title3)
+                    .foregroundStyle(.secondary)
+
+                Divider().overlay(Color.primary.opacity(0.35))
+
+                Button { showingCreateGroup = true } label: {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Create a group")
+                                .font(.system(.title2, design: .serif).bold())
+                            Text("Start a private circle and invite friends.")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Image(systemName: "square.and.pencil")
+                            .font(.title2)
+                    }
+                    .padding(18)
+                    .overlay {
+                        Rectangle().stroke(colorScheme == .dark ? Color.white.opacity(0.16) : .black, lineWidth: 2)
+                    }
+                }
+                .buttonStyle(.plain)
+
+                Button { showingJoinGroup = true } label: {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Join a group")
+                                .font(.system(.title2, design: .serif).bold())
+                            Text("Enter the six-character code you received.")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Image(systemName: "number")
+                            .font(.title2)
+                    }
+                    .padding(18)
+                    .overlay {
+                        Rectangle().stroke(colorScheme == .dark ? Color.white.opacity(0.16) : .black, lineWidth: 2)
+                    }
+                }
+                .buttonStyle(.plain)
+
+                Spacer()
+
+                Button("Use a different account") { auth.signOut() }
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity)
+            }
+            .padding(26)
+        }
+        .sheet(isPresented: $showingCreateGroup) {
+            CreateGroupView()
+                .presentationBackground(.ultraThinMaterial)
+        }
+        .sheet(isPresented: $showingJoinGroup) {
+            JoinGroupView()
+                .presentationBackground(.ultraThinMaterial)
+        }
+    }
+}
+
+private struct RenameGroupView: View {
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var blurbStore: BlurbStore
+    @State private var name: String
+    @State private var isSaving = false
+    let group: BlurbGroup
+
+    init(group: BlurbGroup) {
+        self.group = group
+        _name = State(initialValue: group.name)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("GROUP NAME") { TextField("Group name", text: $name) }
+                Section("INVITE CODE") {
+                    Text(group.inviteCode).font(.body.monospaced())
+                }
+            }
+            .navigationTitle("Edit group")
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button(isSaving ? "Saving…" : "Save") {
+                        isSaving = true
+                        Task {
+                            if await blurbStore.updateGroup(group, name: name) { dismiss() }
+                            isSaving = false
+                        }
+                    }
+                    .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isSaving)
+                }
+            }
+        }
+    }
+}
+
 struct GlassBackground: View {
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
-        LinearGradient(
-            colors: colorScheme == .dark
-                ? [
-                    Color(red: 0.02, green: 0.025, blue: 0.06),
-                    Color(red: 0.065, green: 0.04, blue: 0.15),
-                    Color(red: 0.015, green: 0.02, blue: 0.05)
-                ]
-                : [
-                    Color.white,
-                    Color.indigo.opacity(0.04),
-                    Color.white
-                ],
-            startPoint: .topLeading,
-            endPoint: .bottomTrailing
-        )
+        (colorScheme == .dark
+            ? Color(red: 0.055, green: 0.055, blue: 0.05)
+            : Color(red: 0.965, green: 0.95, blue: 0.88))
         .ignoresSafeArea()
     }
 }

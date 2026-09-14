@@ -8,6 +8,7 @@ struct BlurbGroup: Identifiable, Hashable {
     let name: String
     let ownerID: String
     let memberIDs: [String]
+    let inviteCode: String
 
     var memberCount: Int { memberIDs.count }
 }
@@ -19,6 +20,7 @@ struct BlurbPost: Identifiable, Hashable {
     let authorID: String
     let authorName: String
     let authorPhotoURL: String?
+    let imageURL: String?
     let answer: String
     let prompt: String
     let promptID: String
@@ -64,7 +66,9 @@ struct BlurbProfile {
 @MainActor
 final class BlurbStore: ObservableObject {
     @Published private(set) var groups: [BlurbGroup] = []
+    @Published private(set) var groupsLoaded = false
     @Published private(set) var posts: [BlurbPost] = []
+    @Published private(set) var answerCountsByGroup: [String: Int] = [:]
     @Published private(set) var profile = BlurbProfile()
     @Published var selectedGroupID: String?
     @Published var errorMessage: String?
@@ -73,8 +77,9 @@ final class BlurbStore: ObservableObject {
     private var groupsListener: ListenerRegistration?
     private var postsListener: ListenerRegistration?
     private var profileListener: ListenerRegistration?
+    private var answerCountListeners: [String: ListenerRegistration] = [:]
     private var currentUserID: String?
-    private var didAttemptSampleSeed = false
+    private var activeAnswerCountPromptID: String?
 
     var selectedGroup: BlurbGroup? {
         groups.first { $0.id == selectedGroupID }
@@ -96,14 +101,36 @@ final class BlurbStore: ObservableObject {
         return streak
     }
 
-    func hasAnswered(promptID: String) -> Bool {
+    func hasAnswered(promptID: String, in groupID: String? = nil) -> Bool {
         guard let userID = currentUserID else { return false }
-        return posts.contains { $0.authorID == userID && $0.promptID == promptID }
+        let targetGroupID = groupID ?? selectedGroupID
+        return posts.contains {
+            $0.authorID == userID && $0.promptID == promptID && $0.groupID == targetGroupID
+        }
     }
 
-    func answer(for promptID: String) -> BlurbPost? {
+    func answer(for promptID: String, in groupID: String? = nil) -> BlurbPost? {
         guard let userID = currentUserID else { return nil }
-        return posts.first { $0.authorID == userID && $0.promptID == promptID }
+        let targetGroupID = groupID ?? selectedGroupID
+        return posts.first {
+            $0.authorID == userID && $0.promptID == promptID && $0.groupID == targetGroupID
+        }
+    }
+
+    func existingAnswer(promptID: String, in groupID: String) async -> BlurbPost? {
+        guard let userID = currentUserID else { return nil }
+        if let loadedAnswer = answer(for: promptID, in: groupID) {
+            return loadedAnswer
+        }
+
+        do {
+            let entryID = "\(promptID)_\(userID)_\(groupID)"
+            let snapshot = try await database.collection("posts").document(entryID).getDocument()
+            return Self.makePost(snapshot)
+        } catch {
+            errorMessage = error.localizedDescription
+            return nil
+        }
     }
 
     var currentMonthPoints: Int {
@@ -146,11 +173,15 @@ final class BlurbStore: ObservableObject {
                 let groups = snapshot?.documents.compactMap(Self.makeGroup) ?? []
                 Task { @MainActor in
                     self.groups = groups.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+                    self.groupsLoaded = true
                     if self.selectedGroupID == nil || !groups.contains(where: { $0.id == self.selectedGroupID }) {
                         self.selectedGroupID = groups.first?.id
                     }
                     self.listenForPosts()
-                    self.seedSampleGroupsIfNeeded()
+                    if let promptID = self.activeAnswerCountPromptID {
+                        self.listenForAnswerCounts(promptID: promptID)
+                    }
+                    self.addMissingInviteCodes(from: snapshot?.documents ?? [], userID: userID)
                 }
             }
 
@@ -170,9 +201,41 @@ final class BlurbStore: ObservableObject {
         groupsListener?.remove(); groupsListener = nil
         postsListener?.remove(); postsListener = nil
         profileListener?.remove(); profileListener = nil
+        answerCountListeners.values.forEach { $0.remove() }
+        answerCountListeners = [:]
         currentUserID = nil
-        didAttemptSampleSeed = false
-        groups = []; posts = []; selectedGroupID = nil
+        activeAnswerCountPromptID = nil
+        groups = []; groupsLoaded = false; posts = []; answerCountsByGroup = [:]; selectedGroupID = nil
+    }
+
+    func listenForAnswerCounts(promptID: String) {
+        activeAnswerCountPromptID = promptID
+        answerCountListeners.values.forEach { $0.remove() }
+        answerCountListeners = [:]
+        answerCountsByGroup = [:]
+
+        for group in groups {
+            answerCountListeners[group.id] = database.collection("posts")
+                .whereField("groupID", isEqualTo: group.id)
+                .whereField("promptID", isEqualTo: promptID)
+                .addSnapshotListener { [weak self] snapshot, error in
+                    guard let self else { return }
+                    if let error {
+                        Task { @MainActor in self.errorMessage = error.localizedDescription }
+                        return
+                    }
+                    let uniqueAuthors = Set(snapshot?.documents.compactMap {
+                        $0.data()["authorID"] as? String
+                    } ?? [])
+                    Task { @MainActor in
+                        self.answerCountsByGroup[group.id] = uniqueAuthors.count
+                    }
+                }
+        }
+    }
+
+    func answerCount(in groupID: String) -> Int {
+        answerCountsByGroup[groupID, default: 0]
     }
 
     func select(_ group: BlurbGroup) {
@@ -190,6 +253,7 @@ final class BlurbStore: ObservableObject {
                 "name": name,
                 "ownerID": userID,
                 "memberIDs": [userID],
+                "inviteCode": Self.makeInviteCode(),
                 "createdAt": FieldValue.serverTimestamp()
             ])
             selectedGroupID = reference.documentID
@@ -200,49 +264,66 @@ final class BlurbStore: ObservableObject {
         }
     }
 
-    private func seedSampleGroupsIfNeeded() {
-        guard groups.isEmpty, !didAttemptSampleSeed, let userID = currentUserID else { return }
-        didAttemptSampleSeed = true
-
-        let samples = ["Sunday Dinner", "After Hours", "Music Swap"]
-        let batch = database.batch()
-        for (index, name) in samples.enumerated() {
-            let reference = database.collection("groups").document("sample-\(userID)-\(index)")
-            batch.setData([
-                "name": name,
-                "ownerID": userID,
-                "memberIDs": [userID],
-                "isSample": true,
-                "createdAt": FieldValue.serverTimestamp()
-            ], forDocument: reference, merge: true)
-        }
-
-        Task {
-            do {
-                try await batch.commit()
-            } catch {
-                errorMessage = error.localizedDescription
+    func joinGroup(with rawCode: String) async -> Bool {
+        guard let userID = currentUserID else { return false }
+        let code = rawCode.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        guard !code.isEmpty else { return false }
+        do {
+            let snapshot = try await database.collection("groups")
+                .whereField("inviteCode", isEqualTo: code)
+                .limit(to: 1)
+                .getDocuments()
+            guard let document = snapshot.documents.first else {
+                errorMessage = "That group code wasn’t found. Check it and try again."
+                return false
             }
+            try await document.reference.updateData(["memberIDs": FieldValue.arrayUnion([userID])])
+            selectedGroupID = document.documentID
+            return true
+        } catch {
+            errorMessage = error.localizedDescription
+            return false
         }
     }
 
-    func createPost(answer: String, prompt: DailyPrompt) async -> Bool {
-        guard let userID = currentUserID, let group = selectedGroup else {
+    func updateGroup(_ group: BlurbGroup, name rawName: String) async -> Bool {
+        guard let userID = currentUserID, group.ownerID == userID else {
+            errorMessage = "Only the group owner can rename this group."
+            return false
+        }
+        let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return false }
+        do {
+            try await database.collection("groups").document(group.id).updateData(["name": name])
+            return true
+        } catch {
+            errorMessage = error.localizedDescription
+            return false
+        }
+    }
+
+    func canEdit(_ group: BlurbGroup) -> Bool {
+        group.ownerID == currentUserID
+    }
+
+    func createPost(answer: String, imageData: Data? = nil, prompt: DailyPrompt, in groupID: String? = nil) async -> Bool {
+        guard let userID = currentUserID,
+              let targetGroupID = groupID ?? selectedGroupID,
+              groups.contains(where: { $0.id == targetGroupID }) else {
             errorMessage = "Create a group before posting."
             return false
         }
         let trimmedAnswer = answer.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedAnswer.isEmpty else { return false }
-        guard !hasAnswered(promptID: prompt.id) else {
-            errorMessage = "You've already answered today's Blurb. You can edit or delete it from the feed."
+        guard !trimmedAnswer.isEmpty || (prompt.requiresPhoto && imageData != nil) else { return false }
+        guard !hasAnswered(promptID: prompt.id, in: targetGroupID) else {
+            errorMessage = "You've already answered today's Blurb in this group. You can edit or delete it from the feed."
             return false
         }
         do {
-            // The prompt + user combination makes a second answer for the
-            // same day target the same Firestore document instead of creating
-            // a duplicate. Firestore rules reject that attempted rewrite.
-            let entryID = "\(prompt.id)_\(userID)"
-            let answerRank = posts.filter { $0.promptID == prompt.id }.count + 1
+            // Each group is its own conversation, so the same person may give
+            // a different answer to the same prompt in every group.
+            let entryID = "\(prompt.id)_\(userID)_\(targetGroupID)"
+            let answerRank = posts.filter { $0.promptID == prompt.id && $0.groupID == targetGroupID }.count + 1
             let pointsAwarded = Self.points(for: answerRank)
             var sharedValues: [String: Any] = [
                 "entryID": entryID,
@@ -251,6 +332,7 @@ final class BlurbStore: ObservableObject {
                 "answer": trimmedAnswer,
                 "prompt": prompt.question,
                 "promptID": prompt.id,
+                "isMonthlyReportPrompt": prompt.isNewsletterFeature,
                 "createdAt": FieldValue.serverTimestamp(),
                 "editCount": 0,
                 "countsTowardStreak": true,
@@ -260,8 +342,20 @@ final class BlurbStore: ObservableObject {
             ]
             if let photoURL = profile.photoURL { sharedValues["authorPhotoURL"] = photoURL }
 
-            sharedValues["groupID"] = group.id
-            let reference = database.collection("posts").document("\(entryID)_\(group.id)")
+            if let imageData {
+                let imageReference = Storage.storage().reference().child("post-images/\(entryID).jpg")
+                let metadata = StorageMetadata()
+                metadata.contentType = "image/jpeg"
+                _ = try await imageReference.putDataAsync(imageData, metadata: metadata)
+                sharedValues["imageURL"] = try await imageReference.downloadURL().absoluteString
+            }
+
+            sharedValues["groupID"] = targetGroupID
+            let reference = database.collection("posts").document(entryID)
+            guard !(try await reference.getDocument()).exists else {
+                errorMessage = "You've already answered today's Blurb in this group."
+                return false
+            }
             try await reference.setData(sharedValues)
             return true
         } catch {
@@ -298,16 +392,7 @@ final class BlurbStore: ObservableObject {
                 "countsTowardStreak": false
             ]
 
-            if post.entryID == post.id {
-                try await database.collection("posts").document(post.id).updateData(changes)
-            } else {
-                let batch = database.batch()
-                for group in groups {
-                    let reference = database.collection("posts").document("\(post.entryID)_\(group.id)")
-                    batch.updateData(changes, forDocument: reference)
-                }
-                try await batch.commit()
-            }
+            try await database.collection("posts").document(post.id).updateData(changes)
             return true
         } catch {
             errorMessage = error.localizedDescription
@@ -318,16 +403,7 @@ final class BlurbStore: ObservableObject {
     func deletePost(_ post: BlurbPost) async {
         guard let userID = currentUserID, post.authorID == userID else { return }
         do {
-            if post.entryID == post.id {
-                try await database.collection("posts").document(post.id).delete()
-            } else {
-                let batch = database.batch()
-                for group in groups {
-                    let reference = database.collection("posts").document("\(post.entryID)_\(group.id)")
-                    batch.deleteDocument(reference)
-                }
-                try await batch.commit()
-            }
+            try await database.collection("posts").document(post.id).delete()
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -376,26 +452,41 @@ final class BlurbStore: ObservableObject {
         guard let name = data["name"] as? String,
               let ownerID = data["ownerID"] as? String,
               let memberIDs = data["memberIDs"] as? [String] else { return nil }
-        return BlurbGroup(id: document.documentID, name: name, ownerID: ownerID, memberIDs: memberIDs)
+        return BlurbGroup(
+            id: document.documentID,
+            name: name,
+            ownerID: ownerID,
+            memberIDs: memberIDs,
+            inviteCode: data["inviteCode"] as? String ?? inviteCode(for: document.documentID)
+        )
     }
 
     private static func makePost(_ document: QueryDocumentSnapshot) -> BlurbPost? {
-        let data = document.data()
+        makePost(id: document.documentID, data: document.data())
+    }
+
+    private static func makePost(_ document: DocumentSnapshot) -> BlurbPost? {
+        guard let data = document.data() else { return nil }
+        return makePost(id: document.documentID, data: data)
+    }
+
+    private static func makePost(id: String, data: [String: Any]) -> BlurbPost? {
         guard let groupID = data["groupID"] as? String,
               let authorID = data["authorID"] as? String,
               let authorName = data["authorName"] as? String,
               let answer = data["answer"] as? String,
               let prompt = data["prompt"] as? String else { return nil }
         return BlurbPost(
-            id: document.documentID,
-            entryID: data["entryID"] as? String ?? document.documentID,
+            id: id,
+            entryID: data["entryID"] as? String ?? id,
             groupID: groupID,
             authorID: authorID,
             authorName: authorName,
             authorPhotoURL: data["authorPhotoURL"] as? String,
+            imageURL: data["imageURL"] as? String,
             answer: answer,
             prompt: prompt,
-            promptID: data["promptID"] as? String ?? "legacy-\(document.documentID)",
+            promptID: data["promptID"] as? String ?? "legacy-\(id)",
             createdAt: (data["createdAt"] as? Timestamp)?.dateValue() ?? .now,
             editedAt: (data["editedAt"] as? Timestamp)?.dateValue(),
             editCount: data["editCount"] as? Int ?? 0,
@@ -413,5 +504,21 @@ final class BlurbStore: ObservableObject {
         case 3: return 2
         default: return 1
         }
+    }
+
+    private func addMissingInviteCodes(from documents: [QueryDocumentSnapshot], userID: String) {
+        for document in documents where document.data()["inviteCode"] == nil
+            && document.data()["ownerID"] as? String == userID {
+            document.reference.updateData(["inviteCode": Self.inviteCode(for: document.documentID)])
+        }
+    }
+
+    private static func makeInviteCode() -> String {
+        String(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(6)).uppercased()
+    }
+
+    private static func inviteCode(for documentID: String) -> String {
+        let characters = documentID.uppercased().filter { $0.isLetter || $0.isNumber }
+        return String(characters.prefix(6)).padding(toLength: 6, withPad: "X", startingAt: 0)
     }
 }

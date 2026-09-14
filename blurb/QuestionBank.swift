@@ -13,9 +13,18 @@ struct DailyPrompt: Identifiable, Hashable {
     let question: String
     let kind: PromptKind
     let isNewsletterFeature: Bool
+
+    var requiresPhoto: Bool { id.contains("hidden-report-photo") }
 }
 
 enum QuestionBank {
+    private static let weeklyReflectionPrompts = [
+        "What is one moment from this week you want to remember?",
+        "What felt most meaningful to you this week?",
+        "Post a picture that captures your week.",
+        "What changed your perspective this week?",
+        "What are you carrying forward from this week?"
+    ]
     // Each month has 20 easy prompts, 4 newsletter candidates, and 5 timely prompts.
     // The 17 bonus prompts below make the complete local bank exactly 365 prompts.
     private static let surfaceTemplates = [
@@ -141,8 +150,24 @@ enum QuestionBank {
             return DailyPrompt(id: "birthday-today", question: custom?.isEmpty == false ? custom! : bonusPrompts[0], kind: .birthday, isNewsletterFeature: false)
         }
 
+        // One prompt each week quietly contributes to the private monthly
+        // recap. It looks like any other daily question in the UI.
+        if calendar.component(.weekday, from: date) == 1 {
+            let weekOfMonth = max(1, calendar.component(.weekOfMonth, from: date))
+            let index = (weekOfMonth - 1) % weeklyReflectionPrompts.count
+            let isPhotoPrompt = index == 2
+            return DailyPrompt(
+                id: "hidden-report-\(isPhotoPrompt ? "photo-" : "")\(calendar.component(.year, from: date))-\(calendar.component(.month, from: date))-\(weekOfMonth)",
+                question: weeklyReflectionPrompts[index],
+                kind: .featured,
+                isNewsletterFeature: true
+            )
+        }
+
         let month = calendar.component(.month, from: date) - 1
-        let monthlyQuestions = questions.filter { $0.id.contains("-\(month)-") || $0.id.contains("-\(Calendar.current.monthSymbols[month])-") }
+        let monthlyQuestions = questions.filter {
+            $0.kind != .featured && ($0.id.contains("-\(month)-") || $0.id.contains("-\(Calendar.current.monthSymbols[month])-"))
+        }
         let day = calendar.component(.day, from: date) - 1
         return monthlyQuestions[day % monthlyQuestions.count]
     }
