@@ -20,9 +20,9 @@ struct DailyPrompt: Identifiable, Hashable {
 enum QuestionBank {
     private static let weeklyReflectionPrompts = [
         "What is one moment from this week you want to remember?",
+        "Post a picture of yourself from this month.",
         "What felt most meaningful to you this week?",
-        "Post a picture that captures your week.",
-        "What changed your perspective this week?",
+        "Post a picture of the best meal you ate this month.",
         "What are you carrying forward from this week?"
     ]
     // Each month has 20 easy prompts, 4 newsletter candidates, and 5 timely prompts.
@@ -155,7 +155,7 @@ enum QuestionBank {
         if calendar.component(.weekday, from: date) == 1 {
             let weekOfMonth = max(1, calendar.component(.weekOfMonth, from: date))
             let index = (weekOfMonth - 1) % weeklyReflectionPrompts.count
-            let isPhotoPrompt = index == 2
+            let isPhotoPrompt = index == 1 || index == 3
             return DailyPrompt(
                 id: "hidden-report-\(isPhotoPrompt ? "photo-" : "")\(calendar.component(.year, from: date))-\(calendar.component(.month, from: date))-\(weekOfMonth)",
                 question: weeklyReflectionPrompts[index],

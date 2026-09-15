@@ -2,6 +2,19 @@ import PhotosUI
 import SwiftUI
 import UIKit
 
+private func preparedJPEG(from data: Data, maxDimension: CGFloat = 1_600) -> Data? {
+    guard let image = UIImage(data: data) else { return nil }
+    let largestSide = max(image.size.width, image.size.height)
+    guard largestSide > 0 else { return nil }
+    let scale = min(1, maxDimension / largestSide)
+    let targetSize = CGSize(width: image.size.width * scale, height: image.size.height * scale)
+    let renderer = UIGraphicsImageRenderer(size: targetSize)
+    let resized = renderer.image { _ in
+        image.draw(in: CGRect(origin: .zero, size: targetSize))
+    }
+    return resized.jpegData(compressionQuality: 0.82)
+}
+
 enum AppTab: String, CaseIterable, Identifiable {
     case home, profile, settings
 
@@ -872,13 +885,25 @@ struct NewPostView: View {
                         }
 
                     if requiresPhoto {
-                        PhotosPicker(selection: $photoItem, matching: .images) {
-                            Label(photoData == nil ? "Choose a photo" : "Change photo", systemImage: "photo.on.rectangle")
-                                .font(.headline)
-                                .foregroundStyle(.primary)
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 15)
-                                .background(Color.black.opacity(0.06), in: Capsule())
+                        VStack(spacing: 10) {
+                            if let photoData, let image = UIImage(data: photoData) {
+                                Image(uiImage: image)
+                                    .resizable()
+                                    .scaledToFill()
+                                    .frame(maxWidth: .infinity)
+                                    .frame(height: 190)
+                                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                    .clipped()
+                            }
+
+                            PhotosPicker(selection: $photoItem, matching: .images) {
+                                Label(photoData == nil ? "Choose a photo" : "Change photo", systemImage: "photo.on.rectangle")
+                                    .font(.headline)
+                                    .foregroundStyle(.primary)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 15)
+                                    .background(Color.primary.opacity(0.06), in: Capsule())
+                            }
                         }
                     }
 
@@ -956,7 +981,10 @@ struct NewPostView: View {
                 }
             }
             .onChange(of: photoItem) { _, item in
-                Task { photoData = try? await item?.loadTransferable(type: Data.self) }
+                Task {
+                    guard let original = try? await item?.loadTransferable(type: Data.self) else { return }
+                    photoData = preparedJPEG(from: original)
+                }
             }
         }
     }
@@ -1434,7 +1462,17 @@ struct EditProfileView: View {
                     HStack {
                         Spacer()
                         PhotosPicker(selection: $photoItem, matching: .images) {
-                            ProfilePhoto(urlString: blurbStore.profile.photoURL, size: 96)
+                            Group {
+                                if let photoData, let image = UIImage(data: photoData) {
+                                    Image(uiImage: image)
+                                        .resizable()
+                                        .scaledToFill()
+                                        .frame(width: 96, height: 96)
+                                        .clipShape(Circle())
+                                } else {
+                                    ProfilePhoto(urlString: blurbStore.profile.photoURL, size: 96)
+                                }
+                            }
                                 .overlay(alignment: .bottomTrailing) {
                                     Image(systemName: "camera.fill")
                                         .font(.caption.bold())
@@ -1475,7 +1513,10 @@ struct EditProfileView: View {
             }
             .onAppear { name = blurbStore.profile.displayName }
             .onChange(of: photoItem) { _, item in
-                Task { photoData = try? await item?.loadTransferable(type: Data.self) }
+                Task {
+                    guard let original = try? await item?.loadTransferable(type: Data.self) else { return }
+                    photoData = preparedJPEG(from: original, maxDimension: 1_024)
+                }
             }
         }
     }

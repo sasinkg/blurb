@@ -343,7 +343,8 @@ final class BlurbStore: ObservableObject {
             if let photoURL = profile.photoURL { sharedValues["authorPhotoURL"] = photoURL }
 
             if let imageData {
-                let imageReference = Storage.storage().reference().child("post-images/\(entryID).jpg")
+                let imageReference = Storage.storage().reference()
+                    .child("post-images/\(targetGroupID)/\(userID)/\(entryID).jpg")
                 let metadata = StorageMetadata()
                 metadata.contentType = "image/jpeg"
                 _ = try await imageReference.putDataAsync(imageData, metadata: metadata)
