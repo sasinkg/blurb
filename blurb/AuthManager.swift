@@ -1,6 +1,7 @@
 import AuthenticationServices
 import CryptoKit
 import FirebaseAuth
+import FirebaseCore
 import FirebaseFirestore
 import Foundation
 import Security
@@ -74,6 +75,52 @@ final class AuthManager: ObservableObject {
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    func refreshSession() async -> Bool {
+        guard let user else { return false }
+        do {
+            let token = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
+                user.getIDTokenForcingRefresh(true) { token, error in
+                    if let error {
+                        continuation.resume(throwing: error)
+                    } else if let token {
+                        continuation.resume(returning: token)
+                    } else {
+                        continuation.resume(throwing: NSError(
+                            domain: "DailyBurb.Auth",
+                            code: -1,
+                            userInfo: [NSLocalizedDescriptionKey: "Firebase did not return an authentication token."]
+                        ))
+                    }
+                }
+            }
+            let claims = Self.tokenClaims(from: token)
+            let configuredProject = FirebaseApp.app()?.options.projectID ?? "missing"
+            let audience = claims?["aud"] as? String ?? "missing"
+
+            guard audience == configuredProject else {
+                try? Auth.auth().signOut()
+                errorMessage = "Firebase Authentication and Firestore are using different projects. Expected \(configuredProject), but the sign-in token belongs to \(audience)."
+                return false
+            }
+            return true
+        } catch {
+            errorMessage = error.localizedDescription
+            return false
+        }
+    }
+
+    private static func tokenClaims(from token: String) -> [String: Any]? {
+        let parts = token.split(separator: ".")
+        guard parts.count > 1 else { return nil }
+        var payload = String(parts[1])
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        payload += String(repeating: "=", count: (4 - payload.count % 4) % 4)
+        guard let data = Data(base64Encoded: payload),
+              let object = try? JSONSerialization.jsonObject(with: data) else { return nil }
+        return object as? [String: Any]
     }
 
     func deleteCurrentAccount() async -> Bool {

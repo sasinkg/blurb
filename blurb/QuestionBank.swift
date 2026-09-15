@@ -13,8 +13,32 @@ struct DailyPrompt: Identifiable, Hashable {
     let question: String
     let kind: PromptKind
     let isNewsletterFeature: Bool
+    let acceptedAnswers: [String]
+
+    init(id: String, question: String, kind: PromptKind, isNewsletterFeature: Bool, acceptedAnswers: [String] = []) {
+        self.id = id
+        self.question = question
+        self.kind = kind
+        self.isNewsletterFeature = isNewsletterFeature
+        self.acceptedAnswers = acceptedAnswers
+    }
 
     var requiresPhoto: Bool { id.contains("hidden-report-photo") }
+    var isTrivia: Bool { kind == .trivia }
+    var allowsEditing: Bool { !isTrivia }
+
+    func isCorrect(_ answer: String) -> Bool {
+        guard isTrivia else { return true }
+        let normalized = Self.normalize(answer)
+        return acceptedAnswers.contains { Self.normalize($0) == normalized }
+    }
+
+    private static func normalize(_ value: String) -> String {
+        value.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+    }
 }
 
 enum QuestionBank {
@@ -102,15 +126,31 @@ enum QuestionBank {
         "Trivia: What is the fastest land animal?"
     ]
 
-    private static let hardTriviaQuestions = [
-        "Trivia night: A ship sails due south from the equator for 100 miles, then due west for 100 miles, then due north for 100 miles and returns to its starting point. Where could it be?",
-        "Trivia night: Which mathematician is credited with the first published algorithm intended for a machine?",
-        "Trivia night: What is the only letter that does not appear in the name of any U.S. state?",
-        "Trivia night: Which element has the chemical symbol W, from its German name Wolfram?",
-        "Trivia night: In what year did the Berlin Wall fall?",
-        "Trivia night: What is the world’s largest desert by total area?",
-        "Trivia night: Which novel opens with the line, ‘Call me Ishmael’?",
-        "Trivia night: Which country has the most time zones when its overseas territories are included?"
+    private static let triviaQuestions: [(question: String, answers: [String])] = [
+        ("Which planet is known as the Red Planet?", ["Mars"]),
+        ("What is the largest ocean on Earth?", ["Pacific", "Pacific Ocean"]),
+        ("Which element has the chemical symbol W?", ["Tungsten", "Wolfram"]),
+        ("In what year did the Berlin Wall fall?", ["1989"]),
+        ("Who wrote the novel Frankenstein?", ["Mary Shelley"]),
+        ("What is the capital of New Zealand?", ["Wellington"]),
+        ("How many sides does a dodecagon have?", ["12", "Twelve"]),
+        ("Which artist painted The Starry Night?", ["Vincent van Gogh", "Van Gogh"]),
+        ("What is the largest desert on Earth by total area?", ["Antarctica", "Antarctic Desert"]),
+        ("Which novel begins with the words Call me Ishmael?", ["Moby Dick", "Moby-Dick"]),
+        ("What is the smallest prime number?", ["2", "Two"]),
+        ("Which country gifted the Statue of Liberty to the United States?", ["France"]),
+        ("What is the chemical symbol for gold?", ["Au"]),
+        ("Which language has the most native speakers worldwide?", ["Mandarin", "Mandarin Chinese", "Chinese"]),
+        ("What is the name of the galaxy containing our solar system?", ["Milky Way", "The Milky Way"]),
+        ("Which organ is the largest in the human body?", ["Skin", "The skin"]),
+        ("How many players from one team are on the court in basketball?", ["5", "Five"]),
+        ("Which scientist formulated the three laws of motion?", ["Isaac Newton", "Newton"]),
+        ("What is the capital of Canada?", ["Ottawa"]),
+        ("Which continent contains the most countries?", ["Africa"]),
+        ("What is the hardest natural substance?", ["Diamond"]),
+        ("Who was the first woman to win a Nobel Prize?", ["Marie Curie", "Curie"]),
+        ("What is the longest river in South America?", ["Amazon", "Amazon River"]),
+        ("Which composer wrote The Four Seasons?", ["Antonio Vivaldi", "Vivaldi"])
     ]
 
     static let questions: [DailyPrompt] = {
@@ -139,29 +179,14 @@ enum QuestionBank {
 
     static func prompt(for date: Date = .now, birthdayPrompt: String? = nil, birthday: Date? = nil) -> DailyPrompt {
         let calendar = Calendar.current
-        let isWednesdayNight = calendar.component(.weekday, from: date) == 4
-            && calendar.component(.hour, from: date) >= 18
-        if isWednesdayNight {
+        let thursdayNumber = (calendar.component(.day, from: date) - 1) / 7 + 1
+        if calendar.component(.weekday, from: date) == 5 && thursdayNumber <= 4 {
             return weeklyTrivia(for: date)
         }
 
         if let birthday, calendar.component(.month, from: birthday) == calendar.component(.month, from: date), calendar.component(.day, from: birthday) == calendar.component(.day, from: date) {
             let custom = birthdayPrompt?.trimmingCharacters(in: .whitespacesAndNewlines)
             return DailyPrompt(id: "birthday-today", question: custom?.isEmpty == false ? custom! : bonusPrompts[0], kind: .birthday, isNewsletterFeature: false)
-        }
-
-        // One prompt each week quietly contributes to the private monthly
-        // recap. It looks like any other daily question in the UI.
-        if calendar.component(.weekday, from: date) == 1 {
-            let weekOfMonth = max(1, calendar.component(.weekOfMonth, from: date))
-            let index = (weekOfMonth - 1) % weeklyReflectionPrompts.count
-            let isPhotoPrompt = index == 1 || index == 3
-            return DailyPrompt(
-                id: "hidden-report-\(isPhotoPrompt ? "photo-" : "")\(calendar.component(.year, from: date))-\(calendar.component(.month, from: date))-\(weekOfMonth)",
-                question: weeklyReflectionPrompts[index],
-                kind: .featured,
-                isNewsletterFeature: true
-            )
         }
 
         let month = calendar.component(.month, from: date) - 1
@@ -173,13 +198,18 @@ enum QuestionBank {
     }
 
     static func weeklyTrivia(for date: Date = .now) -> DailyPrompt {
-        let week = Calendar.current.component(.weekOfYear, from: date)
-        let question = hardTriviaQuestions[week % hardTriviaQuestions.count]
+        let calendar = Calendar.current
+        let year = calendar.component(.year, from: date)
+        let month = calendar.component(.month, from: date)
+        let thursdayNumber = min(4, (calendar.component(.day, from: date) - 1) / 7 + 1)
+        let index = abs((year * 48) + ((month - 1) * 4) + thursdayNumber - 1) % triviaQuestions.count
+        let trivia = triviaQuestions[index]
         return DailyPrompt(
-            id: "wednesday-trivia-\(Calendar.current.component(.yearForWeekOfYear, from: date))-\(week)",
-            question: question,
+            id: "thursday-trivia-\(year)-\(month)-\(thursdayNumber)",
+            question: trivia.question,
             kind: .trivia,
-            isNewsletterFeature: false
+            isNewsletterFeature: true,
+            acceptedAnswers: trivia.answers
         )
     }
 }

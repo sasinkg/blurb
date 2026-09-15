@@ -24,12 +24,14 @@ enum AppAppearance: String, CaseIterable, Identifiable {
 
 @main
 struct blurbApp: App {
-    @StateObject private var auth = AuthManager()
-    @StateObject private var blurbStore = BlurbStore()
+    @StateObject private var auth: AuthManager
+    @StateObject private var blurbStore: BlurbStore
     @AppStorage("appAppearance") private var appAppearance = AppAppearance.system.rawValue
 
     init() {
         FirebaseApp.configure()
+        _auth = StateObject(wrappedValue: AuthManager())
+        _blurbStore = StateObject(wrappedValue: BlurbStore())
     }
 
     var body: some Scene {
@@ -47,6 +49,17 @@ struct blurbApp: App {
             .environmentObject(blurbStore)
             .fontDesign(.serif)
             .preferredColorScheme(AppAppearance(rawValue: appAppearance)?.colorScheme)
+            .onChange(of: auth.user?.uid) { _, userID in
+                if userID == nil {
+                    blurbStore.invalidateListeners()
+                    Task { @MainActor in
+                        await Task.yield()
+                        if auth.user == nil {
+                            blurbStore.stop()
+                        }
+                    }
+                }
+            }
         }
     }
 }

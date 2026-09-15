@@ -13,7 +13,12 @@ service firebase.storage {
     }
 
     match /post-images/{groupID}/{userID}/{fileName} {
-      allow delete: if request.auth != null && request.auth.uid == userID;
+      allow delete: if request.auth != null && (
+        request.auth.uid == userID
+        || firestore.get(
+          /databases/(default)/documents/groups/$(groupID)
+        ).data.ownerID == request.auth.uid
+      );
       allow read: if request.auth != null
         && firestore.get(
           /databases/(default)/documents/groups/$(groupID)

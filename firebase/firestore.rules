@@ -15,6 +15,11 @@ service cloud.firestore {
         );
     }
 
+    function isGroupOwner(groupID) {
+      return signedIn()
+        && get(/databases/$(database)/documents/groups/$(groupID)).data.ownerID == request.auth.uid;
+    }
+
     match /users/{userID} {
       allow read, create, update, delete: if signedIn() && request.auth.uid == userID;
     }
@@ -73,6 +78,10 @@ service cloud.firestore {
         && (
           request.resource.data.diff(resource.data).affectedKeys().hasOnly(['likeIDs'])
           || (
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['commentCount'])
+            && request.resource.data.commentCount == resource.data.get('commentCount', 0) + 1
+          )
+          || (
             request.auth.uid == resource.data.authorID
             && request.resource.data.diff(resource.data).affectedKeys()
               .hasOnly(['authorName', 'authorPhotoURL'])
@@ -86,7 +95,30 @@ service cloud.firestore {
               .hasOnly(['answer', 'editedAt', 'editCount', 'countsTowardStreak'])
           )
         );
-      allow delete: if signedIn() && request.auth.uid == resource.data.authorID;
+      allow delete: if signedIn() && (
+        request.auth.uid == resource.data.authorID
+        || isGroupOwner(resource.data.groupID)
+      );
+
+      match /comments/{commentID} {
+        allow read: if isGroupMember(
+          get(/databases/$(database)/documents/posts/$(postID)).data.groupID
+        );
+        allow create: if isGroupMember(
+            get(/databases/$(database)/documents/posts/$(postID)).data.groupID
+          )
+          && request.resource.data.authorID == request.auth.uid
+          && request.resource.data.text is string
+          && request.resource.data.text.size() > 0
+          && request.resource.data.text.size() <= 1000;
+        allow update: if false;
+        allow delete: if signedIn() && (
+          request.auth.uid == resource.data.authorID
+          || isGroupOwner(
+            get(/databases/$(database)/documents/posts/$(postID)).data.groupID
+          )
+        );
+      }
     }
   }
 }

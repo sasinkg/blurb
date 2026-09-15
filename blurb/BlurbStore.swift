@@ -31,9 +31,9 @@ struct BlurbPost: Identifiable, Hashable {
     let likeIDs: [String]
     let answerRank: Int
     let pointsAwarded: Int
+    let commentCount: Int
 
     var likeCount: Int { likeIDs.count }
-    var commentCount: Int { 0 }
     var placementLabel: String? {
         switch answerRank {
         case 1: return "1st place!"
@@ -53,6 +53,15 @@ struct BlurbPost: Identifiable, Hashable {
     }
 }
 
+struct BlurbComment: Identifiable, Hashable {
+    let id: String
+    let authorID: String
+    let authorName: String
+    let authorPhotoURL: String?
+    let text: String
+    let createdAt: Date
+}
+
 struct MonthlyWinner {
     let title: String
     let points: Int
@@ -70,6 +79,7 @@ final class BlurbStore: ObservableObject {
     @Published private(set) var posts: [BlurbPost] = []
     @Published private(set) var answerCountsByGroup: [String: Int] = [:]
     @Published private(set) var profile = BlurbProfile()
+    @Published private(set) var commentsByPostID: [String: [BlurbComment]] = [:]
     @Published var selectedGroupID: String?
     @Published var errorMessage: String?
 
@@ -78,8 +88,10 @@ final class BlurbStore: ObservableObject {
     private var postsListener: ListenerRegistration?
     private var profileListener: ListenerRegistration?
     private var answerCountListeners: [String: ListenerRegistration] = [:]
+    private var commentListeners: [String: ListenerRegistration] = [:]
     private var currentUserID: String?
     private var activeAnswerCountPromptID: String?
+    private var listenerGeneration = 0
 
     var selectedGroup: BlurbGroup? {
         groups.first { $0.id == selectedGroupID }
@@ -166,17 +178,22 @@ final class BlurbStore: ObservableObject {
         stop()
         currentUserID = userID
         errorMessage = nil
+        let generation = listenerGeneration
 
         groupsListener = database.collection("groups")
             .whereField("memberIDs", arrayContains: userID)
             .addSnapshotListener { [weak self] snapshot, error in
-                guard let self else { return }
+                guard let self, self.listenerGeneration == generation else { return }
                 if let error {
-                    Task { @MainActor in self.errorMessage = error.localizedDescription }
+                    Task { @MainActor in
+                        guard self.listenerGeneration == generation else { return }
+                        self.errorMessage = error.localizedDescription
+                    }
                     return
                 }
                 let groups = snapshot?.documents.compactMap(Self.makeGroup) ?? []
                 Task { @MainActor in
+                    guard self.listenerGeneration == generation else { return }
                     self.groups = groups.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
                     self.groupsLoaded = true
                     if self.selectedGroupID == nil || !groups.contains(where: { $0.id == self.selectedGroupID }) {
@@ -192,9 +209,11 @@ final class BlurbStore: ObservableObject {
 
         profileListener = database.collection("users").document(userID)
             .addSnapshotListener { [weak self] snapshot, _ in
+                guard let self, self.listenerGeneration == generation else { return }
                 guard let data = snapshot?.data() else { return }
                 Task { @MainActor in
-                    self?.profile = BlurbProfile(
+                    guard self.listenerGeneration == generation else { return }
+                    self.profile = BlurbProfile(
                         displayName: data["displayName"] as? String ?? "Blurb friend",
                         photoURL: data["photoURL"] as? String
                     )
@@ -202,20 +221,29 @@ final class BlurbStore: ObservableObject {
             }
     }
 
-    func stop() {
+    func invalidateListeners() {
+        listenerGeneration += 1
+        currentUserID = nil
         groupsListener?.remove(); groupsListener = nil
         postsListener?.remove(); postsListener = nil
         profileListener?.remove(); profileListener = nil
         answerCountListeners.values.forEach { $0.remove() }
         answerCountListeners = [:]
+        commentListeners.values.forEach { $0.remove() }
+        commentListeners = [:]
+    }
+
+    func stop() {
+        invalidateListeners()
         currentUserID = nil
         activeAnswerCountPromptID = nil
-        groups = []; groupsLoaded = false; posts = []; answerCountsByGroup = [:]; selectedGroupID = nil
+        groups = []; groupsLoaded = false; posts = []; answerCountsByGroup = [:]; commentsByPostID = [:]; selectedGroupID = nil
         errorMessage = nil
     }
 
     func listenForAnswerCounts(promptID: String) {
         guard currentUserID != nil else { return }
+        let generation = listenerGeneration
         activeAnswerCountPromptID = promptID
         answerCountListeners.values.forEach { $0.remove() }
         answerCountListeners = [:]
@@ -226,15 +254,19 @@ final class BlurbStore: ObservableObject {
                 .whereField("groupID", isEqualTo: group.id)
                 .whereField("promptID", isEqualTo: promptID)
                 .addSnapshotListener { [weak self] snapshot, error in
-                    guard let self else { return }
+                    guard let self, self.listenerGeneration == generation else { return }
                     if let error {
-                        Task { @MainActor in self.errorMessage = error.localizedDescription }
+                        Task { @MainActor in
+                            guard self.listenerGeneration == generation else { return }
+                            self.errorMessage = error.localizedDescription
+                        }
                         return
                     }
                     let uniqueAuthors = Set(snapshot?.documents.compactMap {
                         $0.data()["authorID"] as? String
                     } ?? [])
                     Task { @MainActor in
+                        guard self.listenerGeneration == generation else { return }
                         self.answerCountsByGroup[group.id] = uniqueAuthors.count
                     }
                 }
@@ -335,6 +367,43 @@ final class BlurbStore: ObservableObject {
         group.ownerID == currentUserID
     }
 
+    func deleteGroup(_ group: BlurbGroup) async -> Bool {
+        guard let userID = currentUserID, group.ownerID == userID else {
+            errorMessage = "Only the group owner can delete this group."
+            return false
+        }
+
+        do {
+            let groupPosts = try await database.collection("posts")
+                .whereField("groupID", isEqualTo: group.id)
+                .getDocuments()
+
+            for post in groupPosts.documents {
+                let comments = try await post.reference.collection("comments").getDocuments()
+                for comment in comments.documents {
+                    try await comment.reference.delete()
+                }
+
+                let data = post.data()
+                if data["imageURL"] as? String != nil,
+                   let authorID = data["authorID"] as? String {
+                    try? await Storage.storage().reference()
+                        .child("post-images/\(group.id)/\(authorID)/\(post.documentID).jpg")
+                        .delete()
+                }
+                try await post.reference.delete()
+            }
+
+            try? await database.collection("groupInvites").document(group.inviteCode).delete()
+            try await database.collection("groups").document(group.id).delete()
+            if selectedGroupID == group.id { selectedGroupID = nil }
+            return true
+        } catch {
+            errorMessage = error.localizedDescription
+            return false
+        }
+    }
+
     func createPost(answer: String, imageData: Data? = nil, prompt: DailyPrompt, in groupID: String? = nil) async -> Bool {
         guard let userID = currentUserID,
               let targetGroupID = groupID ?? selectedGroupID,
@@ -366,6 +435,7 @@ final class BlurbStore: ObservableObject {
                 "editCount": 0,
                 "countsTowardStreak": true,
                 "likeIDs": [],
+                "commentCount": 0,
                 "answerRank": answerRank,
                 "pointsAwarded": pointsAwarded
             ]
@@ -402,6 +472,58 @@ final class BlurbStore: ObservableObject {
             try await database.collection("posts").document(post.id).updateData(["likeIDs": fieldValue])
         } catch {
             errorMessage = error.localizedDescription
+        }
+    }
+
+    func listenForComments(on post: BlurbPost) {
+        commentListeners[post.id]?.remove()
+        let generation = listenerGeneration
+        commentListeners[post.id] = database.collection("posts").document(post.id)
+            .collection("comments")
+            .order(by: "createdAt")
+            .addSnapshotListener { [weak self] snapshot, error in
+                guard let self, self.listenerGeneration == generation else { return }
+                if let error {
+                    Task { @MainActor in self.errorMessage = error.localizedDescription }
+                    return
+                }
+                let comments = snapshot?.documents.compactMap(Self.makeComment) ?? []
+                Task { @MainActor in
+                    guard self.listenerGeneration == generation else { return }
+                    self.commentsByPostID[post.id] = comments
+                }
+            }
+    }
+
+    func stopListeningForComments(on postID: String) {
+        commentListeners[postID]?.remove()
+        commentListeners[postID] = nil
+    }
+
+    func addComment(_ rawText: String, to post: BlurbPost) async -> Bool {
+        guard let userID = currentUserID else { return false }
+        let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return false }
+
+        let postReference = database.collection("posts").document(post.id)
+        let commentReference = postReference.collection("comments").document()
+        var values: [String: Any] = [
+            "authorID": userID,
+            "authorName": profile.displayName,
+            "text": text,
+            "createdAt": FieldValue.serverTimestamp()
+        ]
+        if let photoURL = profile.photoURL { values["authorPhotoURL"] = photoURL }
+
+        do {
+            let batch = database.batch()
+            batch.setData(values, forDocument: commentReference)
+            batch.updateData(["commentCount": FieldValue.increment(Int64(1))], forDocument: postReference)
+            try await batch.commit()
+            return true
+        } catch {
+            errorMessage = error.localizedDescription
+            return false
         }
     }
 
@@ -526,17 +648,24 @@ final class BlurbStore: ObservableObject {
     private func listenForPosts() {
         postsListener?.remove()
         guard let groupID = selectedGroupID, currentUserID != nil else { posts = []; return }
+        let generation = listenerGeneration
         postsListener = database.collection("posts")
             .whereField("groupID", isEqualTo: groupID)
             .addSnapshotListener { [weak self] snapshot, error in
-                guard let self else { return }
+                guard let self, self.listenerGeneration == generation else { return }
                 if let error {
-                    Task { @MainActor in self.errorMessage = error.localizedDescription }
+                    Task { @MainActor in
+                        guard self.listenerGeneration == generation else { return }
+                        self.errorMessage = error.localizedDescription
+                    }
                     return
                 }
                 let posts = (snapshot?.documents.compactMap(Self.makePost) ?? [])
                     .sorted { $0.createdAt > $1.createdAt }
-                Task { @MainActor in self.posts = posts }
+                Task { @MainActor in
+                    guard self.listenerGeneration == generation else { return }
+                    self.posts = posts
+                }
             }
     }
 
@@ -586,7 +715,23 @@ final class BlurbStore: ObservableObject {
             countsTowardStreak: data["countsTowardStreak"] as? Bool ?? true,
             likeIDs: data["likeIDs"] as? [String] ?? [],
             answerRank: data["answerRank"] as? Int ?? 1,
-            pointsAwarded: data["pointsAwarded"] as? Int ?? 1
+            pointsAwarded: data["pointsAwarded"] as? Int ?? 1,
+            commentCount: data["commentCount"] as? Int ?? 0
+        )
+    }
+
+    private static func makeComment(_ document: QueryDocumentSnapshot) -> BlurbComment? {
+        let data = document.data()
+        guard let authorID = data["authorID"] as? String,
+              let authorName = data["authorName"] as? String,
+              let text = data["text"] as? String else { return nil }
+        return BlurbComment(
+            id: document.documentID,
+            authorID: authorID,
+            authorName: authorName,
+            authorPhotoURL: data["authorPhotoURL"] as? String,
+            text: text,
+            createdAt: (data["createdAt"] as? Timestamp)?.dateValue() ?? .now
         )
     }
 
@@ -607,11 +752,15 @@ final class BlurbStore: ObservableObject {
                     if document.data()["inviteCode"] == nil {
                         try await document.reference.updateData(["inviteCode": code])
                     }
-                    try await database.collection("groupInvites").document(code).setData([
-                        "groupID": document.documentID,
-                        "ownerID": userID,
-                        "createdAt": FieldValue.serverTimestamp()
-                    ], merge: true)
+                    let inviteReference = database.collection("groupInvites").document(code)
+                    let invite = try await inviteReference.getDocument()
+                    if !invite.exists {
+                        try await inviteReference.setData([
+                            "groupID": document.documentID,
+                            "ownerID": userID,
+                            "createdAt": FieldValue.serverTimestamp()
+                        ])
+                    }
                 } catch {
                     self.errorMessage = error.localizedDescription
                 }

@@ -75,7 +75,9 @@ struct ContentView: View {
         .tint(.primary)
         .task(id: auth.user?.uid) {
             if let userID = auth.user?.uid {
-                blurbStore.start(for: userID)
+                if await auth.refreshSession() {
+                    blurbStore.start(for: userID)
+                }
             }
         }
         .fullScreenCover(isPresented: Binding(
@@ -515,9 +517,9 @@ private struct GroupFeedView: View {
     private var promptCard: some View {
         VStack(spacing: 12) {
             Button { showingNewPost = true } label: {
-                HStack(spacing: 16) {
+                VStack(alignment: .leading, spacing: 10) {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text(todayPrompt.kind == .trivia ? "WEDNESDAY TRIVIA" : "TODAY'S BLURB")
+                        Text(todayPrompt.kind == .trivia ? "THURSDAY TRIVIA" : "TODAY'S BLURB")
                             .font(.caption.bold())
                             .tracking(1)
                             .opacity(0.8)
@@ -525,19 +527,32 @@ private struct GroupFeedView: View {
                             .font(.system(size: 24, weight: .bold, design: .serif))
                             .multilineTextAlignment(.leading)
                     }
-                    Spacer()
-                    Image(systemName: blurbStore.hasAnswered(promptID: todayPrompt.id, in: group.id) ? "checkmark" : "arrow.right")
-                        .font(.title3.bold())
-                        .padding(14)
-                        .background(
-                            colorScheme == .dark
-                                ? Color(red: 1, green: 0.78, blue: 0.02)
-                                : Color(red: 0.78, green: 0.56, blue: 0.02),
-                            in: Circle()
-                        )
-                        .foregroundStyle(.black)
+
+                    if blurbStore.hasAnswered(promptID: todayPrompt.id, in: group.id) {
+                        Text("ANSWERED")
+                            .font(.caption.weight(.black))
+                            .tracking(1.4)
+                            .foregroundStyle(.black)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(
+                                colorScheme == .dark
+                                    ? Color(red: 1, green: 0.78, blue: 0.02)
+                                    : Color(red: 0.78, green: 0.56, blue: 0.02)
+                            )
+                    } else {
+                        HStack {
+                            Text("Tap to answer")
+                                .font(.caption.bold())
+                            Spacer()
+                            Image(systemName: "arrow.right")
+                                .font(.headline.bold())
+                        }
+                        .foregroundStyle(.secondary)
+                    }
                 }
                 .foregroundStyle(.primary)
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(18)
                 .background { VibrantCardBackground(seed: group.name) }
                 .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
@@ -619,6 +634,7 @@ private struct GroupFeedView: View {
 
 struct PostCard: View {
     @Environment(\.colorScheme) private var colorScheme
+    @EnvironmentObject private var blurbStore: BlurbStore
     let post: BlurbPost
     let currentUserID: String?
     let toggleLike: () -> Void
@@ -626,8 +642,13 @@ struct PostCard: View {
     let deleteAnswer: (() -> Void)?
     let showComments: () -> Void
 
+    private var previewComments: [BlurbComment] {
+        Array((blurbStore.commentsByPostID[post.id] ?? []).prefix(2))
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 10) {
             HStack {
                 AsyncImage(url: URL(string: post.authorPhotoURL ?? "")) { image in
                     image.resizable().scaledToFill()
@@ -636,8 +657,8 @@ struct PostCard: View {
                         .symbolRenderingMode(.hierarchical)
                         .foregroundStyle(.indigo)
                 }
-                .font(.largeTitle)
-                .frame(width: 46, height: 46)
+                .font(.title)
+                .frame(width: 38, height: 38)
                 .clipShape(Circle())
 
                 VStack(alignment: .leading, spacing: 3) {
@@ -678,8 +699,6 @@ struct PostCard: View {
                 }
             }
 
-            Divider().opacity(0.5)
-
             Text(post.answer)
                 .font(.body)
 
@@ -696,35 +715,126 @@ struct PostCard: View {
                 .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
             }
 
-            HStack(spacing: 18) {
+            HStack(spacing: 0) {
                 Button(action: toggleLike) {
-                    Label("\(post.likeCount)", systemImage: post.likeIDs.contains(currentUserID ?? "") ? "heart.fill" : "heart")
-                        .foregroundStyle(post.likeIDs.contains(currentUserID ?? "") ? .red : .secondary)
+                    HStack(spacing: 5) {
+                        Image(systemName: post.likeIDs.contains(currentUserID ?? "") ? "heart.fill" : "heart")
+                        Text("LIKE")
+                            .font(.caption2.weight(.black))
+                            .tracking(0.7)
+                        Text("\(post.likeCount)")
+                            .font(.caption2.monospacedDigit())
+                    }
+                    .font(.caption)
+                    .foregroundStyle(post.likeIDs.contains(currentUserID ?? "") ? .red : .secondary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 7)
                 }
                 .buttonStyle(.plain)
+
+                Rectangle()
+                    .fill(Color.primary.opacity(0.18))
+                    .frame(width: 1, height: 18)
 
                 Button(action: showComments) {
-                    Label("\(post.commentCount)", systemImage: "bubble.right")
-                        .foregroundStyle(.secondary)
+                    HStack(spacing: 5) {
+                        Image(systemName: "bubble.right.fill")
+                        Text("REPLY")
+                            .font(.caption2.weight(.black))
+                            .tracking(0.7)
+                        Text("\(post.commentCount)")
+                            .font(.caption2.monospacedDigit())
+                    }
+                    .font(.caption)
+                    .foregroundStyle(colorScheme == .dark ? Color.yellow : Color(red: 0.62, green: 0.44, blue: 0))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 7)
                 }
                 .buttonStyle(.plain)
+            }
+            .background(Color.primary.opacity(colorScheme == .dark ? 0.06 : 0.035))
+            .overlay {
+                Rectangle()
+                    .stroke(Color.primary.opacity(0.2), lineWidth: 1)
+            }
 
-                Spacer()
+            }
+            .padding(14)
+            .background(cardFill, in: RoundedRectangle(cornerRadius: 7))
+            .overlay {
+                RoundedRectangle(cornerRadius: 7)
+                    .stroke(colorScheme == .dark ? Color.white.opacity(0.14) : .black, lineWidth: 1.5)
+            }
+            .shadow(color: .black.opacity(colorScheme == .dark ? 0.28 : 0.06), radius: 4, y: 2)
+            .zIndex(1)
+
+            if !previewComments.isEmpty {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(previewComments) { comment in
+                        CompactCommentRow(comment: comment)
+                        if comment.id != previewComments.last?.id {
+                            Rectangle()
+                                .fill(Color.primary.opacity(0.1))
+                                .frame(height: 1)
+                                .padding(.leading, 34)
+                        }
+                    }
+
+                    if post.commentCount > 2 {
+                        Button(action: showComments) {
+                            Text("View more comments")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(replyAccent)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.top, 4)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 14)
+                .padding(.top, 8)
+                .padding(.bottom, 7)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(commentTabFill)
+                .overlay {
+                    UnevenRoundedRectangle(
+                        topLeadingRadius: 0,
+                        bottomLeadingRadius: 5,
+                        bottomTrailingRadius: 5,
+                        topTrailingRadius: 0
+                    )
+                    .stroke(Color.primary.opacity(colorScheme == .dark ? 0.18 : 0.45), lineWidth: 1)
+                }
+                .clipShape(
+                    UnevenRoundedRectangle(
+                        topLeadingRadius: 0,
+                        bottomLeadingRadius: 5,
+                        bottomTrailingRadius: 5,
+                        topTrailingRadius: 0
+                    )
+                )
+                .padding(.horizontal, 10)
+                .padding(.top, -2)
             }
         }
-        .padding(18)
-        .background(cardFill, in: RoundedRectangle(cornerRadius: 7))
-        .overlay {
-            RoundedRectangle(cornerRadius: 7)
-                .stroke(colorScheme == .dark ? Color.white.opacity(0.14) : .black, lineWidth: 1.5)
-        }
-        .shadow(color: .black.opacity(colorScheme == .dark ? 0.28 : 0.06), radius: 4, y: 2)
+        .onAppear { blurbStore.listenForComments(on: post) }
+        .onDisappear { blurbStore.stopListeningForComments(on: post.id) }
     }
 
     private var cardFill: Color {
         colorScheme == .dark
             ? Color(red: 0.14, green: 0.14, blue: 0.14)
             : Color(red: 0.995, green: 0.99, blue: 0.96)
+    }
+
+    private var replyAccent: Color {
+        colorScheme == .dark ? Color(red: 1, green: 0.78, blue: 0.02) : Color(red: 0.68, green: 0.48, blue: 0)
+    }
+
+    private var commentTabFill: Color {
+        colorScheme == .dark
+            ? Color(red: 0.105, green: 0.105, blue: 0.105)
+            : Color(red: 0.96, green: 0.94, blue: 0.84)
     }
 
     private var rankColor: Color? {
@@ -734,6 +844,24 @@ struct PostCard: View {
         case 3: return Color(red: 0.65, green: 0.38, blue: 0.18)
         default: return nil
         }
+    }
+}
+
+private struct CompactCommentRow: View {
+    let comment: BlurbComment
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 4) {
+            Text(comment.authorName + ":")
+                .font(.caption2.weight(.bold))
+                .lineLimit(1)
+            Text(comment.text)
+                .font(.caption2)
+                .lineLimit(1)
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 3)
+        .contentShape(Rectangle())
     }
 }
 
@@ -1019,45 +1147,178 @@ struct NewPostView: View {
 
 struct CommentsView: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.colorScheme) private var colorScheme
+    @EnvironmentObject private var blurbStore: BlurbStore
     let post: BlurbPost
     @State private var newComment = ""
+    @State private var isSending = false
+
+    private var comments: [BlurbComment] {
+        blurbStore.commentsByPostID[post.id] ?? []
+    }
+
+    private var accent: Color {
+        colorScheme == .dark ? Color(red: 1, green: 0.78, blue: 0.02) : Color(red: 0.78, green: 0.56, blue: 0.02)
+    }
+
+    private var borderColor: Color {
+        colorScheme == .dark ? Color.white.opacity(0.18) : .black
+    }
 
     var body: some View {
         NavigationStack {
             ZStack {
                 GlassBackground()
 
-                VStack(spacing: 18) {
-                    Text("Comments on \(post.authorName)'s Blurb")
-                        .font(.headline)
-
-                    ContentUnavailableView(
-                        "No comments yet",
-                        systemImage: "bubble.left.and.bubble.right",
-                        description: Text("Be the first roommate to respond.")
-                    )
-
-                    HStack {
-                        TextField("Add a comment", text: $newComment)
-                            .textFieldStyle(.roundedBorder)
-
-                        Button("Send") {
-                            newComment = ""
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 24) {
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text("THE REPLY DESK")
+                                .font(.caption.weight(.black))
+                                .tracking(2)
+                                .foregroundStyle(.black)
+                                .padding(.horizontal, 9)
+                                .padding(.vertical, 5)
+                                .background(accent)
+                            Text("Comments")
+                                .font(.system(size: 38, weight: .bold, design: .serif))
+                            Text("Join the conversation below.")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
                         }
-                        .disabled(newComment.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+                        VStack(alignment: .leading, spacing: 14) {
+                            HStack(spacing: 11) {
+                                ProfilePhoto(urlString: post.authorPhotoURL, size: 42)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(post.authorName)
+                                        .font(.system(.headline, design: .serif).bold())
+                                    Text(post.timeLabel)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            Rectangle().fill(Color.primary.opacity(0.18)).frame(height: 1)
+                            Text(post.answer)
+                                .font(.system(.body, design: .serif))
+                                .lineSpacing(3)
+                        }
+                        .padding(16)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(colorScheme == .dark ? Color.white.opacity(0.06) : Color.white.opacity(0.55))
+                        .overlay { Rectangle().stroke(borderColor, lineWidth: 1.5) }
+
+                        VStack(alignment: .leading, spacing: 12) {
+                            HStack {
+                                Text("REPLIES").font(.caption.weight(.black)).tracking(1.5)
+                                Spacer()
+                                Text("\(comments.count)").font(.caption.monospacedDigit().bold()).foregroundStyle(.secondary)
+                            }
+                            Rectangle().fill(Color.primary.opacity(0.35)).frame(height: 1)
+                            if comments.isEmpty {
+                                VStack(spacing: 10) {
+                                    Image(systemName: "text.bubble")
+                                        .font(.system(size: 28, weight: .medium))
+                                        .foregroundStyle(accent)
+                                    Text("No replies yet")
+                                        .font(.system(.title3, design: .serif).bold())
+                                    Text("Be the first person to add a note.")
+                                        .font(.subheadline)
+                                        .foregroundStyle(.secondary)
+                                }
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 42)
+                            } else {
+                                ForEach(comments) { comment in
+                                    CommentRow(comment: comment, accent: accent)
+                                    if comment.id != comments.last?.id {
+                                        Rectangle().fill(Color.primary.opacity(0.12)).frame(height: 1)
+                                    }
+                                }
+                            }
+                        }
                     }
+                    .padding(20)
                 }
-                .padding()
             }
-            .navigationTitle("Comments")
+            .navigationTitle("")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem {
-                    Button("Done") {
-                        dismiss()
-                    }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { dismiss() }
                 }
+            }
+            .safeAreaInset(edge: .bottom) {
+                HStack(spacing: 10) {
+                    TextField("Write a reply…", text: $newComment, axis: .vertical)
+                        .lineLimit(1...4)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 12)
+                        .background(colorScheme == .dark ? Color.white.opacity(0.08) : Color.white.opacity(0.72))
+                        .overlay { Rectangle().stroke(borderColor, lineWidth: 1.5) }
+
+                    Button { sendComment() } label: {
+                        Group {
+                            if isSending {
+                                ProgressView().tint(.black)
+                            } else {
+                                Image(systemName: "paperplane.fill")
+                            }
+                        }
+                        .font(.headline)
+                        .foregroundStyle(.black)
+                        .frame(width: 48, height: 48)
+                        .background(accent)
+                    }
+                    .disabled(isSending || newComment.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .opacity(newComment.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0.45 : 1)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .background(.ultraThinMaterial)
+                .overlay(alignment: .top) { Rectangle().fill(Color.primary.opacity(0.18)).frame(height: 1) }
+            }
+            .onAppear { blurbStore.listenForComments(on: post) }
+            .onDisappear { blurbStore.stopListeningForComments(on: post.id) }
+        }
+    }
+
+    private func sendComment() {
+        let text = newComment
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        isSending = true
+        Task {
+            if await blurbStore.addComment(text, to: post) {
+                newComment = ""
+            }
+            isSending = false
+        }
+    }
+}
+
+private struct CommentRow: View {
+    let comment: BlurbComment
+    let accent: Color
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 11) {
+            ProfilePhoto(urlString: comment.authorPhotoURL, size: 36)
+            VStack(alignment: .leading, spacing: 5) {
+                Text(comment.authorName)
+                    .font(.system(.headline, design: .serif).bold())
+                Text(comment.text)
+                    .font(.system(.body, design: .serif))
+                    .lineSpacing(3)
             }
         }
+        .padding(.vertical, 7)
+        .overlay(alignment: .leading) {
+            Rectangle()
+                .fill(accent)
+                .frame(width: 3)
+                .offset(x: -9)
+        }
+        .padding(.leading, 9)
     }
 }
 
@@ -1690,7 +1951,7 @@ struct SettingsView: View {
                         }
 
                         settingsCard(title: "ACCOUNT") {
-                            Button("Log out") { auth.signOut() }
+                            Button("Sign out") { auth.signOut() }
                                 .disabled(isDeletingAccount)
 
                             Divider()
@@ -1928,6 +2189,8 @@ private struct RenameGroupView: View {
     @EnvironmentObject private var blurbStore: BlurbStore
     @State private var name: String
     @State private var isSaving = false
+    @State private var isDeleting = false
+    @State private var showingDeleteConfirmation = false
     let group: BlurbGroup
 
     init(group: BlurbGroup) {
@@ -1941,6 +2204,23 @@ private struct RenameGroupView: View {
                 Section("GROUP NAME") { TextField("Group name", text: $name) }
                 Section("INVITE CODE") {
                     Text(group.inviteCode).font(.body.monospaced())
+                }
+                Section {
+                    Button("Delete group", role: .destructive) {
+                        showingDeleteConfirmation = true
+                    }
+                    .disabled(isSaving || isDeleting)
+
+                    if isDeleting {
+                        HStack(spacing: 8) {
+                            ProgressView()
+                            Text("Deleting group…")
+                        }
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    }
+                } footer: {
+                    Text("Deleting a group permanently removes it and its Daily Answers for every member.")
                 }
             }
             .navigationTitle("Edit group")
@@ -1956,6 +2236,22 @@ private struct RenameGroupView: View {
                     }
                     .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isSaving)
                 }
+            }
+            .confirmationDialog(
+                "Delete \(group.name) for everyone?",
+                isPresented: $showingDeleteConfirmation,
+                titleVisibility: .visible
+            ) {
+                Button("Delete group", role: .destructive) {
+                    isDeleting = true
+                    Task {
+                        if await blurbStore.deleteGroup(group) { dismiss() }
+                        isDeleting = false
+                    }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("This permanently deletes the group, all Daily Answers, and all replies. This cannot be undone.")
             }
         }
     }
