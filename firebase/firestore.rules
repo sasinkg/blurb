@@ -20,9 +20,7 @@ service cloud.firestore {
     }
 
     match /groups/{groupID} {
-      // A signed-in person must be able to look up a group by its invite code
-      // before they are a member. The app only queries for an exact code.
-      allow read: if signedIn();
+      allow read: if signedIn() && request.auth.uid in resource.data.memberIDs;
       allow create: if signedIn()
         && request.auth.uid == request.resource.data.ownerID
         && request.resource.data.memberIDs.size() == 1
@@ -35,6 +33,8 @@ service cloud.firestore {
           && request.auth.uid in request.resource.data.memberIDs
           && request.resource.data.memberIDs.hasAll(resource.data.memberIDs)
           && request.resource.data.memberIDs.size() == resource.data.memberIDs.size() + 1
+          && exists(/databases/$(database)/documents/groupInvites/$(resource.data.inviteCode))
+          && get(/databases/$(database)/documents/groupInvites/$(resource.data.inviteCode)).data.groupID == groupID
         )
         || (
           request.resource.data.diff(resource.data).affectedKeys().hasOnly(['memberIDs'])
@@ -47,9 +47,24 @@ service cloud.firestore {
       allow delete: if signedIn() && request.auth.uid == resource.data.ownerID;
     }
 
+    match /groupInvites/{inviteCode} {
+      // Codes are unguessable document IDs. They can be fetched directly but
+      // never listed or searched, so group metadata remains private.
+      allow get: if signedIn();
+      allow list: if false;
+      allow create: if signedIn()
+        && request.resource.data.ownerID == request.auth.uid
+        && getAfter(/databases/$(database)/documents/groups/$(request.resource.data.groupID)).data.ownerID == request.auth.uid
+        && getAfter(/databases/$(database)/documents/groups/$(request.resource.data.groupID)).data.inviteCode == inviteCode;
+      allow update: if signedIn()
+        && resource.data.ownerID == request.auth.uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['ownerID']);
+      allow delete: if signedIn()
+        && resource.data.ownerID == request.auth.uid;
+    }
+
     match /posts/{postID} {
-      allow read: if signedIn()
-        && request.auth.uid in resource.data.viewerIDs;
+      allow read: if isGroupMember(resource.data.groupID);
       allow create: if isGroupMember(request.resource.data.groupID)
         && request.auth.uid == request.resource.data.authorID
         && request.auth.uid in request.resource.data.viewerIDs;

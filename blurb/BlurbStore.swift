@@ -128,7 +128,6 @@ final class BlurbStore: ObservableObject {
                 .whereField("groupID", isEqualTo: groupID)
                 .whereField("promptID", isEqualTo: promptID)
                 .whereField("authorID", isEqualTo: userID)
-                .whereField("viewerIDs", arrayContains: userID)
                 .limit(to: 1)
                 .getDocuments()
             return snapshot.documents.first.flatMap { Self.makePost($0) }
@@ -166,6 +165,7 @@ final class BlurbStore: ObservableObject {
         guard currentUserID != userID else { return }
         stop()
         currentUserID = userID
+        errorMessage = nil
 
         groupsListener = database.collection("groups")
             .whereField("memberIDs", arrayContains: userID)
@@ -186,7 +186,7 @@ final class BlurbStore: ObservableObject {
                     if let promptID = self.activeAnswerCountPromptID {
                         self.listenForAnswerCounts(promptID: promptID)
                     }
-                    self.addMissingInviteCodes(from: snapshot?.documents ?? [], userID: userID)
+                    self.ensureInviteRecords(from: snapshot?.documents ?? [], userID: userID)
                 }
             }
 
@@ -211,10 +211,11 @@ final class BlurbStore: ObservableObject {
         currentUserID = nil
         activeAnswerCountPromptID = nil
         groups = []; groupsLoaded = false; posts = []; answerCountsByGroup = [:]; selectedGroupID = nil
+        errorMessage = nil
     }
 
     func listenForAnswerCounts(promptID: String) {
-        guard let userID = currentUserID else { return }
+        guard currentUserID != nil else { return }
         activeAnswerCountPromptID = promptID
         answerCountListeners.values.forEach { $0.remove() }
         answerCountListeners = [:]
@@ -224,7 +225,6 @@ final class BlurbStore: ObservableObject {
             answerCountListeners[group.id] = database.collection("posts")
                 .whereField("groupID", isEqualTo: group.id)
                 .whereField("promptID", isEqualTo: promptID)
-                .whereField("viewerIDs", arrayContains: userID)
                 .addSnapshotListener { [weak self] snapshot, error in
                     guard let self else { return }
                     if let error {
@@ -256,14 +256,38 @@ final class BlurbStore: ObservableObject {
         guard !name.isEmpty else { return false }
         do {
             let reference = database.collection("groups").document()
-            try await reference.setData([
+            let inviteCode = Self.makeInviteCode()
+            let batch = database.batch()
+            batch.setData([
                 "name": name,
                 "ownerID": userID,
                 "memberIDs": [userID],
-                "inviteCode": Self.makeInviteCode(),
+                "inviteCode": inviteCode,
                 "createdAt": FieldValue.serverTimestamp()
-            ])
+            ], forDocument: reference)
+            batch.setData([
+                "groupID": reference.documentID,
+                "ownerID": userID,
+                "createdAt": FieldValue.serverTimestamp()
+            ], forDocument: database.collection("groupInvites").document(inviteCode))
+            try await batch.commit()
+            let newGroup = BlurbGroup(
+                id: reference.documentID,
+                name: name,
+                ownerID: userID,
+                memberIDs: [userID],
+                inviteCode: inviteCode
+            )
+            if !groups.contains(where: { $0.id == newGroup.id }) {
+                groups.append(newGroup)
+                groups.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+            }
+            groupsLoaded = true
             selectedGroupID = reference.documentID
+            listenForPosts()
+            if let promptID = activeAnswerCountPromptID {
+                listenForAnswerCounts(promptID: promptID)
+            }
             return true
         } catch {
             errorMessage = error.localizedDescription
@@ -276,16 +300,14 @@ final class BlurbStore: ObservableObject {
         let code = rawCode.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
         guard !code.isEmpty else { return false }
         do {
-            let snapshot = try await database.collection("groups")
-                .whereField("inviteCode", isEqualTo: code)
-                .limit(to: 1)
-                .getDocuments()
-            guard let document = snapshot.documents.first else {
+            let invite = try await database.collection("groupInvites").document(code).getDocument()
+            guard let groupID = invite.data()?["groupID"] as? String else {
                 errorMessage = "That group code wasn’t found. Check it and try again."
                 return false
             }
-            try await document.reference.updateData(["memberIDs": FieldValue.arrayUnion([userID])])
-            selectedGroupID = document.documentID
+            try await database.collection("groups").document(groupID)
+                .updateData(["memberIDs": FieldValue.arrayUnion([userID])])
+            selectedGroupID = groupID
             return true
         } catch {
             errorMessage = error.localizedDescription
@@ -439,7 +461,6 @@ final class BlurbStore: ObservableObject {
                 let authoredPosts = try await database.collection("posts")
                     .whereField("groupID", isEqualTo: group.id)
                     .whereField("authorID", isEqualTo: userID)
-                    .whereField("viewerIDs", arrayContains: userID)
                     .getDocuments()
                 for post in authoredPosts.documents {
                     try await post.reference.updateData(postProfileValues)
@@ -464,7 +485,6 @@ final class BlurbStore: ObservableObject {
                 let ownPosts = try await database.collection("posts")
                     .whereField("groupID", isEqualTo: group.id)
                     .whereField("authorID", isEqualTo: userID)
-                    .whereField("viewerIDs", arrayContains: userID)
                     .getDocuments()
                 for post in ownPosts.documents {
                     try await post.reference.delete()
@@ -477,11 +497,14 @@ final class BlurbStore: ObservableObject {
                 if group.ownerID == userID {
                     let remainingMembers = group.memberIDs.filter { $0 != userID }
                     if let newOwner = remainingMembers.first {
+                        try await database.collection("groupInvites").document(group.inviteCode)
+                            .updateData(["ownerID": newOwner])
                         try await groupReference.updateData([
                             "ownerID": newOwner,
                             "memberIDs": remainingMembers
                         ])
                     } else {
+                        try? await database.collection("groupInvites").document(group.inviteCode).delete()
                         try await groupReference.delete()
                     }
                 } else {
@@ -502,10 +525,9 @@ final class BlurbStore: ObservableObject {
 
     private func listenForPosts() {
         postsListener?.remove()
-        guard let groupID = selectedGroupID, let userID = currentUserID else { posts = []; return }
+        guard let groupID = selectedGroupID, currentUserID != nil else { posts = []; return }
         postsListener = database.collection("posts")
             .whereField("groupID", isEqualTo: groupID)
-            .whereField("viewerIDs", arrayContains: userID)
             .addSnapshotListener { [weak self] snapshot, error in
                 guard let self else { return }
                 if let error {
@@ -577,10 +599,23 @@ final class BlurbStore: ObservableObject {
         }
     }
 
-    private func addMissingInviteCodes(from documents: [QueryDocumentSnapshot], userID: String) {
-        for document in documents where document.data()["inviteCode"] == nil
-            && document.data()["ownerID"] as? String == userID {
-            document.reference.updateData(["inviteCode": Self.inviteCode(for: document.documentID)])
+    private func ensureInviteRecords(from documents: [QueryDocumentSnapshot], userID: String) {
+        for document in documents where document.data()["ownerID"] as? String == userID {
+            let code = document.data()["inviteCode"] as? String ?? Self.inviteCode(for: document.documentID)
+            Task {
+                do {
+                    if document.data()["inviteCode"] == nil {
+                        try await document.reference.updateData(["inviteCode": code])
+                    }
+                    try await database.collection("groupInvites").document(code).setData([
+                        "groupID": document.documentID,
+                        "ownerID": userID,
+                        "createdAt": FieldValue.serverTimestamp()
+                    ], merge: true)
+                } catch {
+                    self.errorMessage = error.localizedDescription
+                }
+            }
         }
     }
 
