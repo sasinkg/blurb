@@ -1718,6 +1718,7 @@ struct ProfilePhoto: View {
 
 struct EditProfileView: View {
     @Environment(\.dismiss) private var dismiss
+    @State private var existingPhotoURL: String?
     @EnvironmentObject private var blurbStore: BlurbStore
     @State private var name = ""
     @State private var photoItem: PhotosPickerItem?
@@ -1740,7 +1741,7 @@ struct EditProfileView: View {
                                         .frame(width: 96, height: 96)
                                         .clipShape(Circle())
                                 } else {
-                                    ProfilePhoto(urlString: blurbStore.profile.photoURL, size: 96)
+                                    ProfilePhoto(urlString: existingPhotoURL, size: 96)
                                 }
                             }
                                 .overlay(alignment: .bottomTrailing) {
@@ -1783,7 +1784,10 @@ struct EditProfileView: View {
                     .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isSaving)
                 }
             }
-            .onAppear { name = blurbStore.profile.displayName }
+            .onAppear {
+                name = blurbStore.profile.displayName
+                existingPhotoURL = blurbStore.profile.photoURL
+            }
             .alert("Couldn't save profile", isPresented: Binding(
                 get: { saveError != nil },
                 set: { if !$0 { saveError = nil } }
