@@ -8,31 +8,60 @@ service cloud.firestore {
 
     function isGroupMember(groupID) {
       return signedIn()
-        && request.auth.uid in get(/databases/$(database)/documents/groups/$(groupID)).data.memberIDs;
+        && exists(/databases/$(database)/documents/groups/$(groupID))
+        && (
+          get(/databases/$(database)/documents/groups/$(groupID)).data.ownerID == request.auth.uid
+          || get(/databases/$(database)/documents/groups/$(groupID)).data.memberIDs.hasAny([request.auth.uid])
+        );
     }
 
     match /users/{userID} {
-      allow read, create, update: if signedIn() && request.auth.uid == userID;
+      allow read, create, update, delete: if signedIn() && request.auth.uid == userID;
     }
 
     match /groups/{groupID} {
-      allow read: if signedIn() && request.auth.uid in resource.data.memberIDs;
+      // A signed-in person must be able to look up a group by its invite code
+      // before they are a member. The app only queries for an exact code.
+      allow read: if signedIn();
       allow create: if signedIn()
         && request.auth.uid == request.resource.data.ownerID
         && request.resource.data.memberIDs.size() == 1
         && request.auth.uid in request.resource.data.memberIDs;
-      allow update: if signedIn() && request.auth.uid == resource.data.ownerID;
+      allow update: if signedIn() && (
+        request.auth.uid == resource.data.ownerID
+        || (
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['memberIDs'])
+          && !(request.auth.uid in resource.data.memberIDs)
+          && request.auth.uid in request.resource.data.memberIDs
+          && request.resource.data.memberIDs.hasAll(resource.data.memberIDs)
+          && request.resource.data.memberIDs.size() == resource.data.memberIDs.size() + 1
+        )
+        || (
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['memberIDs'])
+          && request.auth.uid in resource.data.memberIDs
+          && !(request.auth.uid in request.resource.data.memberIDs)
+          && resource.data.memberIDs.hasAll(request.resource.data.memberIDs)
+          && request.resource.data.memberIDs.size() == resource.data.memberIDs.size() - 1
+        )
+      );
       allow delete: if signedIn() && request.auth.uid == resource.data.ownerID;
     }
 
     match /posts/{postID} {
-      allow read: if isGroupMember(resource.data.groupID);
+      allow read: if signedIn()
+        && request.auth.uid in resource.data.viewerIDs;
       allow create: if isGroupMember(request.resource.data.groupID)
-        && request.auth.uid == request.resource.data.authorID;
+        && request.auth.uid == request.resource.data.authorID
+        && request.auth.uid in request.resource.data.viewerIDs;
       allow update: if isGroupMember(resource.data.groupID)
         && request.resource.data.groupID == resource.data.groupID
         && (
           request.resource.data.diff(resource.data).affectedKeys().hasOnly(['likeIDs'])
+          || (
+            request.auth.uid == resource.data.authorID
+            && request.resource.data.diff(resource.data).affectedKeys()
+              .hasOnly(['authorName', 'authorPhotoURL'])
+          )
           || (
             request.auth.uid == resource.data.authorID
             && resource.data.editCount == 0

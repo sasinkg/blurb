@@ -124,9 +124,14 @@ final class BlurbStore: ObservableObject {
         }
 
         do {
-            let entryID = "\(promptID)_\(userID)_\(groupID)"
-            let snapshot = try await database.collection("posts").document(entryID).getDocument()
-            return Self.makePost(snapshot)
+            let snapshot = try await database.collection("posts")
+                .whereField("groupID", isEqualTo: groupID)
+                .whereField("promptID", isEqualTo: promptID)
+                .whereField("authorID", isEqualTo: userID)
+                .whereField("viewerIDs", arrayContains: userID)
+                .limit(to: 1)
+                .getDocuments()
+            return snapshot.documents.first.flatMap { Self.makePost($0) }
         } catch {
             errorMessage = error.localizedDescription
             return nil
@@ -209,6 +214,7 @@ final class BlurbStore: ObservableObject {
     }
 
     func listenForAnswerCounts(promptID: String) {
+        guard let userID = currentUserID else { return }
         activeAnswerCountPromptID = promptID
         answerCountListeners.values.forEach { $0.remove() }
         answerCountListeners = [:]
@@ -218,6 +224,7 @@ final class BlurbStore: ObservableObject {
             answerCountListeners[group.id] = database.collection("posts")
                 .whereField("groupID", isEqualTo: group.id)
                 .whereField("promptID", isEqualTo: promptID)
+                .whereField("viewerIDs", arrayContains: userID)
                 .addSnapshotListener { [weak self] snapshot, error in
                     guard let self else { return }
                     if let error {
@@ -340,6 +347,9 @@ final class BlurbStore: ObservableObject {
                 "answerRank": answerRank,
                 "pointsAwarded": pointsAwarded
             ]
+            if let group = groups.first(where: { $0.id == targetGroupID }) {
+                sharedValues["viewerIDs"] = group.memberIDs
+            }
             if let photoURL = profile.photoURL { sharedValues["authorPhotoURL"] = photoURL }
 
             if let imageData {
@@ -353,10 +363,6 @@ final class BlurbStore: ObservableObject {
 
             sharedValues["groupID"] = targetGroupID
             let reference = database.collection("posts").document(entryID)
-            guard !(try await reference.getDocument()).exists else {
-                errorMessage = "You've already answered today's Blurb in this group."
-                return false
-            }
             try await reference.setData(sharedValues)
             return true
         } catch {
@@ -424,6 +430,69 @@ final class BlurbStore: ObservableObject {
                 values["photoURL"] = try await reference.downloadURL().absoluteString
             }
             try await database.collection("users").document(userID).setData(values, merge: true)
+
+            var postProfileValues: [String: Any] = ["authorName": name]
+            if let photoURL = values["photoURL"] as? String ?? profile.photoURL {
+                postProfileValues["authorPhotoURL"] = photoURL
+            }
+            for group in groups {
+                let authoredPosts = try await database.collection("posts")
+                    .whereField("groupID", isEqualTo: group.id)
+                    .whereField("authorID", isEqualTo: userID)
+                    .whereField("viewerIDs", arrayContains: userID)
+                    .getDocuments()
+                for post in authoredPosts.documents {
+                    try await post.reference.updateData(postProfileValues)
+                }
+            }
+
+            profile.displayName = name
+            if let photoURL = values["photoURL"] as? String {
+                profile.photoURL = photoURL
+            }
+            return true
+        } catch {
+            errorMessage = error.localizedDescription
+            return false
+        }
+    }
+
+    func deleteAccountData() async -> Bool {
+        guard let userID = currentUserID else { return false }
+        do {
+            for group in groups {
+                let ownPosts = try await database.collection("posts")
+                    .whereField("groupID", isEqualTo: group.id)
+                    .whereField("authorID", isEqualTo: userID)
+                    .whereField("viewerIDs", arrayContains: userID)
+                    .getDocuments()
+                for post in ownPosts.documents {
+                    try await post.reference.delete()
+                    try? await Storage.storage().reference()
+                        .child("post-images/\(group.id)/\(userID)/\(post.documentID).jpg")
+                        .delete()
+                }
+
+                let groupReference = database.collection("groups").document(group.id)
+                if group.ownerID == userID {
+                    let remainingMembers = group.memberIDs.filter { $0 != userID }
+                    if let newOwner = remainingMembers.first {
+                        try await groupReference.updateData([
+                            "ownerID": newOwner,
+                            "memberIDs": remainingMembers
+                        ])
+                    } else {
+                        try await groupReference.delete()
+                    }
+                } else {
+                    try await groupReference.updateData([
+                        "memberIDs": FieldValue.arrayRemove([userID])
+                    ])
+                }
+            }
+
+            try? await Storage.storage().reference().child("profile-images/\(userID).jpg").delete()
+            try await database.collection("users").document(userID).delete()
             return true
         } catch {
             errorMessage = error.localizedDescription
@@ -433,9 +502,10 @@ final class BlurbStore: ObservableObject {
 
     private func listenForPosts() {
         postsListener?.remove()
-        guard let groupID = selectedGroupID else { posts = []; return }
+        guard let groupID = selectedGroupID, let userID = currentUserID else { posts = []; return }
         postsListener = database.collection("posts")
             .whereField("groupID", isEqualTo: groupID)
+            .whereField("viewerIDs", arrayContains: userID)
             .addSnapshotListener { [weak self] snapshot, error in
                 guard let self else { return }
                 if let error {

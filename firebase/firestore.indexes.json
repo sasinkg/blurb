@@ -1,0 +1,32 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "posts",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "viewerIDs", "arrayConfig": "CONTAINS" },
+        { "fieldPath": "groupID", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "posts",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "viewerIDs", "arrayConfig": "CONTAINS" },
+        { "fieldPath": "groupID", "order": "ASCENDING" },
+        { "fieldPath": "promptID", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "posts",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "viewerIDs", "arrayConfig": "CONTAINS" },
+        { "fieldPath": "authorID", "order": "ASCENDING" },
+        { "fieldPath": "groupID", "order": "ASCENDING" },
+        { "fieldPath": "promptID", "order": "ASCENDING" }
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}

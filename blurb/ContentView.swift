@@ -86,12 +86,20 @@ struct ContentView: View {
                 .interactiveDismissDisabled()
         }
         .alert("Blurb", isPresented: Binding(
-            get: { blurbStore.errorMessage != nil },
-            set: { if !$0 { blurbStore.errorMessage = nil } }
+            get: { blurbStore.errorMessage != nil || auth.errorMessage != nil },
+            set: {
+                if !$0 {
+                    blurbStore.errorMessage = nil
+                    auth.errorMessage = nil
+                }
+            }
         )) {
-            Button("OK", role: .cancel) { blurbStore.errorMessage = nil }
+            Button("OK", role: .cancel) {
+                blurbStore.errorMessage = nil
+                auth.errorMessage = nil
+            }
         } message: {
-            Text(blurbStore.errorMessage ?? "Please try again.")
+            Text(blurbStore.errorMessage ?? auth.errorMessage ?? "Please try again.")
         }
     }
 
@@ -1454,6 +1462,7 @@ struct EditProfileView: View {
     @State private var photoItem: PhotosPickerItem?
     @State private var photoData: Data?
     @State private var isSaving = false
+    @State private var saveError: String?
 
     var body: some View {
         NavigationStack {
@@ -1504,6 +1513,8 @@ struct EditProfileView: View {
                         Task {
                             if await blurbStore.updateProfile(name: name, imageData: photoData) {
                                 dismiss()
+                            } else {
+                                saveError = blurbStore.errorMessage ?? "Your profile couldn't be saved. Please try again."
                             }
                             isSaving = false
                         }
@@ -1512,6 +1523,14 @@ struct EditProfileView: View {
                 }
             }
             .onAppear { name = blurbStore.profile.displayName }
+            .alert("Couldn't save profile", isPresented: Binding(
+                get: { saveError != nil },
+                set: { if !$0 { saveError = nil } }
+            )) {
+                Button("OK", role: .cancel) { saveError = nil }
+            } message: {
+                Text(saveError ?? "")
+            }
             .onChange(of: photoItem) { _, item in
                 Task {
                     guard let original = try? await item?.loadTransferable(type: Data.self) else { return }
@@ -1590,6 +1609,7 @@ struct BadgeRow: View {
 }
 
 struct SettingsView: View {
+    @EnvironmentObject private var auth: AuthManager
     @EnvironmentObject private var blurbStore: BlurbStore
     @AppStorage("dailyReminderEnabled") private var dailyReminderEnabled = true
     @AppStorage("weeklyTriviaEnabled") private var weeklyTriviaEnabled = true
@@ -1599,6 +1619,8 @@ struct SettingsView: View {
     @State private var showingCreateGroup = false
     @State private var showingJoinGroup = false
     @State private var copiedGroupName: String?
+    @State private var showingDeleteAccount = false
+    @State private var isDeletingAccount = false
 
     var body: some View {
         NavigationStack {
@@ -1666,6 +1688,27 @@ struct SettingsView: View {
                                 .font(.subheadline)
                                 .foregroundStyle(.secondary)
                         }
+
+                        settingsCard(title: "ACCOUNT") {
+                            Button("Log out") { auth.signOut() }
+                                .disabled(isDeletingAccount)
+
+                            Divider()
+
+                            Button("Delete account", role: .destructive) {
+                                showingDeleteAccount = true
+                            }
+                            .disabled(isDeletingAccount)
+
+                            if isDeletingAccount {
+                                HStack(spacing: 8) {
+                                    ProgressView()
+                                    Text("Deleting account…")
+                                }
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            }
+                        }
                     }
                     .padding()
                 }
@@ -1689,6 +1732,24 @@ struct SettingsView: View {
                 Button("OK", role: .cancel) { copiedGroupName = nil }
             } message: {
                 Text("The invite link for \(copiedGroupName ?? "this group") is ready to share.")
+            }
+            .confirmationDialog(
+                "Permanently delete your account?",
+                isPresented: $showingDeleteAccount,
+                titleVisibility: .visible
+            ) {
+                Button("Delete account", role: .destructive) {
+                    isDeletingAccount = true
+                    Task {
+                        if await blurbStore.deleteAccountData() {
+                            _ = await auth.deleteCurrentAccount()
+                        }
+                        isDeletingAccount = false
+                    }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("This removes your profile, photos, answers, and group memberships. This cannot be undone.")
             }
         }
     }

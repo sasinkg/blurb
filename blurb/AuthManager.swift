@@ -76,16 +76,40 @@ final class AuthManager: ObservableObject {
         }
     }
 
+    func deleteCurrentAccount() async -> Bool {
+        guard let user else { return false }
+        do {
+            try await user.delete()
+            return true
+        } catch {
+            errorMessage = (error as NSError).code == AuthErrorCode.requiresRecentLogin.rawValue
+                ? "For security, sign out and sign in with Apple again before deleting your account."
+                : error.localizedDescription
+            return false
+        }
+    }
+
     private func createProfileIfNeeded(for user: User, fullName: PersonNameComponents?) async throws {
         let profile = Firestore.firestore().collection("users").document(user.uid)
         let snapshot = try await profile.getDocument()
         let name = PersonNameComponentsFormatter().string(from: fullName ?? PersonNameComponents())
-        let displayName = name.isEmpty ? (user.displayName ?? "Blurb friend") : name
+        if !name.isEmpty, user.displayName != name {
+            let changeRequest = user.createProfileChangeRequest()
+            changeRequest.displayName = name
+            try await changeRequest.commitChanges()
+        }
 
-        var values: [String: Any] = [
-            "displayName": displayName,
-            "lastSeenAt": FieldValue.serverTimestamp()
-        ]
+        var values: [String: Any] = ["lastSeenAt": FieldValue.serverTimestamp()]
+        if !name.isEmpty {
+            values["displayName"] = name
+        } else if snapshot.data()?["displayName"] as? String == "Blurb friend",
+                  let authName = user.displayName,
+                  !authName.isEmpty,
+                  authName != "Blurb friend" {
+            values["displayName"] = authName
+        } else if !snapshot.exists {
+            values["displayName"] = user.displayName ?? "Blurb friend"
+        }
         if !snapshot.exists {
             values["createdAt"] = FieldValue.serverTimestamp()
             if let email = user.email {
