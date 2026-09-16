@@ -92,7 +92,7 @@ service cloud.firestore {
             && request.resource.data.editCount == 1
             && request.resource.data.countsTowardStreak == false
             && request.resource.data.diff(resource.data).affectedKeys()
-              .hasOnly(['answer', 'editedAt', 'editCount', 'countsTowardStreak'])
+              .hasOnly(['answer', 'imageURL', 'editedAt', 'editCount', 'countsTowardStreak'])
           )
         );
       allow delete: if signedIn() && (

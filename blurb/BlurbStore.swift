@@ -34,6 +34,7 @@ struct BlurbPost: Identifiable, Hashable {
     let commentCount: Int
 
     var likeCount: Int { likeIDs.count }
+    var effectivePostedAt: Date { editedAt ?? createdAt }
     var placementLabel: String? {
         switch answerRank {
         case 1: return "1st place!"
@@ -82,6 +83,7 @@ final class BlurbStore: ObservableObject {
     @Published private(set) var commentsByPostID: [String: [BlurbComment]] = [:]
     @Published var selectedGroupID: String?
     @Published var errorMessage: String?
+    @Published private(set) var listenerErrorMessage: String?
 
     private let database = Firestore.firestore()
     private var groupsListener: ListenerRegistration?
@@ -92,6 +94,10 @@ final class BlurbStore: ObservableObject {
     private var currentUserID: String?
     private var activeAnswerCountPromptID: String?
     private var listenerGeneration = 0
+    private var listenerErrors: [String: String] = [:]
+#if DEBUG
+    private var isAppStoreScreenshotFixture = false
+#endif
 
     var selectedGroup: BlurbGroup? {
         groups.first { $0.id == selectedGroupID }
@@ -182,18 +188,21 @@ final class BlurbStore: ObservableObject {
 
         groupsListener = database.collection("groups")
             .whereField("memberIDs", arrayContains: userID)
-            .addSnapshotListener { [weak self] snapshot, error in
+            .addSnapshotListener(includeMetadataChanges: true) { [weak self] snapshot, error in
                 guard let self, self.listenerGeneration == generation else { return }
                 if let error {
                     Task { @MainActor in
                         guard self.listenerGeneration == generation else { return }
-                        self.errorMessage = error.localizedDescription
+                        self.recordListenerError(error, source: "groups")
                     }
                     return
                 }
-                let groups = snapshot?.documents.compactMap(Self.makeGroup) ?? []
+                // Dependent queries are authorized through the committed group.
+                guard let snapshot, !snapshot.metadata.hasPendingWrites else { return }
+                let groups = snapshot.documents.compactMap(Self.makeGroup)
                 Task { @MainActor in
                     guard self.listenerGeneration == generation else { return }
+                    self.clearListenerError(source: "groups")
                     self.groups = groups.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
                     self.groupsLoaded = true
                     if self.selectedGroupID == nil || !groups.contains(where: { $0.id == self.selectedGroupID }) {
@@ -203,7 +212,7 @@ final class BlurbStore: ObservableObject {
                     if let promptID = self.activeAnswerCountPromptID {
                         self.listenForAnswerCounts(promptID: promptID)
                     }
-                    self.ensureInviteRecords(from: snapshot?.documents ?? [], userID: userID)
+                    self.ensureInviteRecords(from: snapshot.documents, userID: userID)
                 }
             }
 
@@ -231,6 +240,8 @@ final class BlurbStore: ObservableObject {
         answerCountListeners = [:]
         commentListeners.values.forEach { $0.remove() }
         commentListeners = [:]
+        listenerErrors = [:]
+        listenerErrorMessage = nil
     }
 
     func stop() {
@@ -239,12 +250,18 @@ final class BlurbStore: ObservableObject {
         activeAnswerCountPromptID = nil
         groups = []; groupsLoaded = false; posts = []; answerCountsByGroup = [:]; commentsByPostID = [:]; selectedGroupID = nil
         errorMessage = nil
+        listenerErrors = [:]
+        listenerErrorMessage = nil
     }
 
     func listenForAnswerCounts(promptID: String) {
+#if DEBUG
+        if isAppStoreScreenshotFixture { return }
+#endif
         guard currentUserID != nil else { return }
         let generation = listenerGeneration
         activeAnswerCountPromptID = promptID
+        clearListenerErrors(withPrefix: "answer-count-")
         answerCountListeners.values.forEach { $0.remove() }
         answerCountListeners = [:]
         answerCountsByGroup = [:]
@@ -258,7 +275,7 @@ final class BlurbStore: ObservableObject {
                     if let error {
                         Task { @MainActor in
                             guard self.listenerGeneration == generation else { return }
-                            self.errorMessage = error.localizedDescription
+                            self.recordListenerError(error, source: "answer-count-\(group.id)")
                         }
                         return
                     }
@@ -267,6 +284,7 @@ final class BlurbStore: ObservableObject {
                     } ?? [])
                     Task { @MainActor in
                         guard self.listenerGeneration == generation else { return }
+                        self.clearListenerError(source: "answer-count-\(group.id)")
                         self.answerCountsByGroup[group.id] = uniqueAuthors.count
                     }
                 }
@@ -275,6 +293,16 @@ final class BlurbStore: ObservableObject {
 
     func answerCount(in groupID: String) -> Int {
         answerCountsByGroup[groupID, default: 0]
+    }
+
+    func currentAnswerRank(for post: BlurbPost) -> Int {
+        let rankedPosts = posts
+            .filter { $0.groupID == post.groupID && $0.promptID == post.promptID }
+            .sorted {
+                if $0.effectivePostedAt == $1.effectivePostedAt { return $0.id < $1.id }
+                return $0.effectivePostedAt < $1.effectivePostedAt
+            }
+        return rankedPosts.firstIndex(where: { $0.id == post.id }).map { $0 + 1 } ?? post.answerRank
     }
 
     func select(_ group: BlurbGroup) {
@@ -414,7 +442,7 @@ final class BlurbStore: ObservableObject {
         let trimmedAnswer = answer.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedAnswer.isEmpty || (prompt.requiresPhoto && imageData != nil) else { return false }
         guard !hasAnswered(promptID: prompt.id, in: targetGroupID) else {
-            errorMessage = "You've already answered today's Blurb in this group. You can edit or delete it from the feed."
+            errorMessage = "You've already answered today's Daily Blurb in this group. You can edit or delete it from the feed."
             return false
         }
         do {
@@ -476,6 +504,9 @@ final class BlurbStore: ObservableObject {
     }
 
     func listenForComments(on post: BlurbPost) {
+#if DEBUG
+        if isAppStoreScreenshotFixture { return }
+#endif
         commentListeners[post.id]?.remove()
         let generation = listenerGeneration
         commentListeners[post.id] = database.collection("posts").document(post.id)
@@ -484,12 +515,16 @@ final class BlurbStore: ObservableObject {
             .addSnapshotListener { [weak self] snapshot, error in
                 guard let self, self.listenerGeneration == generation else { return }
                 if let error {
-                    Task { @MainActor in self.errorMessage = error.localizedDescription }
+                    Task { @MainActor in
+                        guard self.listenerGeneration == generation else { return }
+                        self.recordListenerError(error, source: "comments-\(post.id)")
+                    }
                     return
                 }
                 let comments = snapshot?.documents.compactMap(Self.makeComment) ?? []
                 Task { @MainActor in
                     guard self.listenerGeneration == generation else { return }
+                    self.clearListenerError(source: "comments-\(post.id)")
                     self.commentsByPostID[post.id] = comments
                 }
             }
@@ -498,6 +533,7 @@ final class BlurbStore: ObservableObject {
     func stopListeningForComments(on postID: String) {
         commentListeners[postID]?.remove()
         commentListeners[postID] = nil
+        clearListenerError(source: "comments-\(postID)")
     }
 
     func addComment(_ rawText: String, to post: BlurbPost) async -> Bool {
@@ -544,6 +580,40 @@ final class BlurbStore: ObservableObject {
             ]
 
             try await database.collection("posts").document(post.id).updateData(changes)
+            return true
+        } catch {
+            errorMessage = error.localizedDescription
+            return false
+        }
+    }
+
+    func overwritePost(_ post: BlurbPost, answer: String, imageData: Data?) async -> Bool {
+        guard let userID = currentUserID, post.authorID == userID else { return false }
+        guard post.editCount == 0 else {
+            errorMessage = "Each Blurb can only be edited once."
+            return false
+        }
+        let trimmedAnswer = answer.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedAnswer.isEmpty || imageData != nil else { return false }
+
+        do {
+            var changes: [String: Any] = [
+                "answer": trimmedAnswer,
+                "editedAt": FieldValue.serverTimestamp(),
+                "editCount": 1,
+                "countsTowardStreak": false
+            ]
+            if let imageData {
+                let imageReference = Storage.storage().reference()
+                    .child("post-images/\(post.groupID)/\(userID)/\(post.entryID).jpg")
+                let metadata = StorageMetadata()
+                metadata.contentType = "image/jpeg"
+                _ = try await imageReference.putDataAsync(imageData, metadata: metadata)
+                changes["imageURL"] = try await imageReference.downloadURL().absoluteString
+            }
+
+            try await database.collection("posts").document(post.id).updateData(changes)
+            errorMessage = nil
             return true
         } catch {
             errorMessage = error.localizedDescription
@@ -646,27 +716,94 @@ final class BlurbStore: ObservableObject {
     }
 
     private func listenForPosts() {
+#if DEBUG
+        if isAppStoreScreenshotFixture { return }
+#endif
         postsListener?.remove()
         guard let groupID = selectedGroupID, currentUserID != nil else { posts = []; return }
         let generation = listenerGeneration
         postsListener = database.collection("posts")
             .whereField("groupID", isEqualTo: groupID)
-            .addSnapshotListener { [weak self] snapshot, error in
+            .addSnapshotListener(includeMetadataChanges: true) { [weak self] snapshot, error in
                 guard let self, self.listenerGeneration == generation else { return }
                 if let error {
                     Task { @MainActor in
                         guard self.listenerGeneration == generation else { return }
-                        self.errorMessage = error.localizedDescription
+                        self.recordListenerError(error, source: "posts")
                     }
                     return
                 }
-                let posts = (snapshot?.documents.compactMap(Self.makePost) ?? [])
+                // Feed cards start comment listeners for their reply previews.
+                // Do not expose a new local post until its parent is committed.
+                guard let snapshot, !snapshot.metadata.hasPendingWrites else { return }
+                let posts = snapshot.documents.compactMap(Self.makePost)
                     .sorted { $0.createdAt > $1.createdAt }
                 Task { @MainActor in
                     guard self.listenerGeneration == generation else { return }
+                    self.clearListenerError(source: "posts")
                     self.posts = posts
                 }
             }
+    }
+
+#if DEBUG
+    func seedAppStoreScreenshotData() {
+        isAppStoreScreenshotFixture = true
+        let userID = "screenshot-user"
+        let group = BlurbGroup(
+            id: "roomies",
+            name: "Roomies",
+            ownerID: userID,
+            memberIDs: [userID, "maya", "jordan", "sam"],
+            inviteCode: "BLURB1"
+        )
+        let prompt = QuestionBank.prompt(birthdayPrompt: "", birthday: nil)
+        let now = Date.now
+        currentUserID = userID
+        groups = [
+            group,
+            BlurbGroup(id: "family", name: "Family", ownerID: "maya", memberIDs: [userID, "maya", "sam"], inviteCode: "BLURB2"),
+            BlurbGroup(id: "college", name: "College Friends", ownerID: "jordan", memberIDs: [userID, "maya", "jordan", "sam", "alex"], inviteCode: "BLURB3")
+        ]
+        groupsLoaded = true
+        selectedGroupID = group.id
+        answerCountsByGroup = ["roomies": 4, "family": 2, "college": 4]
+        profile = BlurbProfile(displayName: "Alex", photoURL: nil)
+        posts = [
+            BlurbPost(id: "post-alex", entryID: "post-alex", groupID: group.id, authorID: userID, authorName: "Alex", authorPhotoURL: nil, imageURL: nil, answer: "A quiet cup of coffee before everyone woke up.", prompt: prompt.question, promptID: prompt.id, createdAt: now.addingTimeInterval(-300), editedAt: nil, editCount: 0, countsTowardStreak: true, likeIDs: ["maya", "jordan"], answerRank: 1, pointsAwarded: 3, commentCount: 2),
+            BlurbPost(id: "post-maya", entryID: "post-maya", groupID: group.id, authorID: "maya", authorName: "Maya", authorPhotoURL: nil, imageURL: nil, answer: "The coffee shop remembered my order ☕️", prompt: prompt.question, promptID: prompt.id, createdAt: now.addingTimeInterval(-240), editedAt: nil, editCount: 0, countsTowardStreak: true, likeIDs: [userID, "sam"], answerRank: 2, pointsAwarded: 2, commentCount: 1),
+            BlurbPost(id: "post-jordan", entryID: "post-jordan", groupID: group.id, authorID: "jordan", authorName: "Jordan", authorPhotoURL: nil, imageURL: nil, answer: "Ten minutes of sunshine between meetings.", prompt: prompt.question, promptID: prompt.id, createdAt: now.addingTimeInterval(-180), editedAt: nil, editCount: 0, countsTowardStreak: true, likeIDs: ["maya"], answerRank: 3, pointsAwarded: 1, commentCount: 0)
+        ]
+        commentsByPostID = [
+            "post-alex": [
+                BlurbComment(id: "comment-1", authorID: "maya", authorName: "Maya", authorPhotoURL: nil, text: "That sounds perfect.", createdAt: now.addingTimeInterval(-120)),
+                BlurbComment(id: "comment-2", authorID: "sam", authorName: "Sam", authorPhotoURL: nil, text: "Best part of the morning!", createdAt: now.addingTimeInterval(-60))
+            ]
+        ]
+    }
+#endif
+
+    func clearPresentedErrors() {
+        errorMessage = nil
+        listenerErrors = [:]
+        listenerErrorMessage = nil
+    }
+
+    private func recordListenerError(_ error: Error, source: String) {
+        listenerErrors[source] = error.localizedDescription
+        listenerErrorMessage = error.localizedDescription
+    }
+
+    private func clearListenerError(source: String) {
+        listenerErrors[source] = nil
+        listenerErrorMessage = listenerErrors.values.first
+    }
+
+    private func clearListenerErrors(withPrefix prefix: String) {
+        for source in Array(listenerErrors.keys) where source.hasPrefix(prefix) {
+            listenerErrors[source] = nil
+        }
+        listenerErrorMessage = listenerErrors.values.first
     }
 
     private static func makeGroup(_ document: QueryDocumentSnapshot) -> BlurbGroup? {

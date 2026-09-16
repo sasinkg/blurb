@@ -27,7 +27,7 @@ struct WelcomeView: View {
                     .foregroundStyle(.primary)
                     .padding(.top, 48)
 
-                Text("Blurb keeps your closest groups connected through the little things worth sharing.")
+                Text("Daily Blurb keeps your closest groups connected through the little things worth sharing.")
                     .font(.body)
                     .multilineTextAlignment(.center)
                     .foregroundStyle(.secondary)

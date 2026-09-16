@@ -30,12 +30,42 @@ struct blurbApp: App {
 
     init() {
         FirebaseApp.configure()
-        _auth = StateObject(wrappedValue: AuthManager())
-        _blurbStore = StateObject(wrappedValue: BlurbStore())
+        let authManager = AuthManager()
+        let store = BlurbStore()
+#if DEBUG
+        if let screen = ProcessInfo.processInfo.appStoreScreenshot, screen != "welcome" {
+            store.seedAppStoreScreenshotData()
+        }
+#endif
+        _auth = StateObject(wrappedValue: authManager)
+        _blurbStore = StateObject(wrappedValue: store)
     }
 
     var body: some Scene {
         WindowGroup {
+#if DEBUG
+            if let screenshot = ProcessInfo.processInfo.appStoreScreenshot {
+                Group {
+                    if screenshot == "welcome" {
+                        WelcomeView()
+                    } else {
+                        AppStoreScreenshotContentView(screen: screenshot)
+                    }
+                }
+                .environmentObject(auth)
+                .environmentObject(blurbStore)
+                .fontDesign(.serif)
+                .preferredColorScheme(.light)
+            } else {
+                authenticatedApp
+            }
+#else
+            authenticatedApp
+#endif
+        }
+    }
+
+    private var authenticatedApp: some View {
             Group {
                 if auth.isLoading {
                     ProgressView()
@@ -60,6 +90,13 @@ struct blurbApp: App {
                     }
                 }
             }
-        }
+    }
+}
+
+private extension ProcessInfo {
+    var appStoreScreenshot: String? {
+        guard let index = arguments.firstIndex(of: "-AppStoreScreenshot"),
+              arguments.indices.contains(index + 1) else { return nil }
+        return arguments[index + 1]
     }
 }

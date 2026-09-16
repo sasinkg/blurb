@@ -2,6 +2,23 @@ import PhotosUI
 import SwiftUI
 import UIKit
 
+#if DEBUG
+struct AppStoreScreenshotContentView: View {
+    @EnvironmentObject private var blurbStore: BlurbStore
+    let screen: String
+
+    var body: some View {
+        if screen == "feed", let group = blurbStore.groups.first {
+            NavigationStack {
+                GroupFeedView(group: group)
+            }
+        } else {
+            ContentView()
+        }
+    }
+}
+#endif
+
 private func preparedJPEG(from data: Data, maxDimension: CGFloat = 1_600) -> Data? {
     guard let image = UIImage(data: data) else { return nil }
     let largestSide = max(image.size.width, image.size.height)
@@ -50,10 +67,6 @@ struct ContentView: View {
     @State private var showingHomeAudience = false
     @State private var homeAnswerDraft: String?
     @State private var homeImageDraft: Data?
-    @State private var conflictingHomePost: BlurbPost?
-    @State private var conflictingGroupName = ""
-    @State private var homePostToEdit: BlurbPost?
-    @State private var startsHomeEditBlank = false
     @AppStorage("birthdayQuestionsEnabled") private var birthdayQuestionsEnabled = false
     @AppStorage("birthdayQuestion") private var birthdayQuestion = ""
     @AppStorage("birthdayTimestamp") private var birthdayTimestamp = Date.now.timeIntervalSince1970
@@ -87,21 +100,21 @@ struct ContentView: View {
             GroupOnboardingView()
                 .interactiveDismissDisabled()
         }
-        .alert("Blurb", isPresented: Binding(
-            get: { blurbStore.errorMessage != nil || auth.errorMessage != nil },
+        .alert("Daily Blurb", isPresented: Binding(
+            get: { blurbStore.errorMessage != nil || blurbStore.listenerErrorMessage != nil || auth.errorMessage != nil },
             set: {
                 if !$0 {
-                    blurbStore.errorMessage = nil
+                    blurbStore.clearPresentedErrors()
                     auth.errorMessage = nil
                 }
             }
         )) {
             Button("OK", role: .cancel) {
-                blurbStore.errorMessage = nil
+                blurbStore.clearPresentedErrors()
                 auth.errorMessage = nil
             }
         } message: {
-            Text(blurbStore.errorMessage ?? auth.errorMessage ?? "Please try again.")
+            Text(blurbStore.errorMessage ?? auth.errorMessage ?? blurbStore.listenerErrorMessage ?? "Please try again.")
         }
     }
 
@@ -183,43 +196,11 @@ struct ContentView: View {
                 }
                 .presentationBackground(.ultraThinMaterial)
             }
-            .sheet(item: $homePostToEdit) { post in
-                NewPostView(
-                    prompt: post.prompt,
-                    initialAnswer: startsHomeEditBlank ? nil : post.answer,
-                    themeSeed: conflictingGroupName
-                ) { answer, _ in
-                    let saved = await blurbStore.editPost(post, answer: answer)
-                    if saved { clearHomeDraft() }
-                    return saved
+            .sheet(isPresented: $showingHomeAudience, onDismiss: clearHomeDraft) {
+                HomeAudiencePicker(groups: blurbStore.groups) { selectedGroups in
+                    await applyHomeAnswer(to: selectedGroups)
                 }
                 .presentationBackground(.ultraThinMaterial)
-            }
-            .confirmationDialog("Where should this answer go?", isPresented: $showingHomeAudience, titleVisibility: .visible) {
-                Button("All groups") { postHomeAnswer(to: blurbStore.groups) }
-                ForEach(blurbStore.groups) { group in
-                    Button(group.name) { postHomeAnswer(to: [group]) }
-                }
-                Button("Cancel", role: .cancel) { clearHomeDraft() }
-            } message: {
-                Text("Share the same answer everywhere, or keep it to one group.")
-            }
-            .confirmationDialog(
-                "You already answered in \(conflictingGroupName)",
-                isPresented: Binding(
-                    get: { conflictingHomePost != nil },
-                    set: { if !$0 { conflictingHomePost = nil } }
-                ),
-                titleVisibility: .visible
-            ) {
-                Button("Edit existing answer") { openConflictingAnswer(blank: false) }
-                Button("Write a new answer") { openConflictingAnswer(blank: true) }
-                Button("Choose another group", role: .cancel) {
-                    conflictingHomePost = nil
-                    showingHomeAudience = true
-                }
-            } message: {
-                Text("Each group can have one answer per day. You can revise the answer that’s already there.")
             }
             .task(id: todayPrompt.id) {
                 blurbStore.listenForAnswerCounts(promptID: todayPrompt.id)
@@ -239,28 +220,25 @@ struct ContentView: View {
         showingHomeAudience = true
     }
 
-    private func postHomeAnswer(to groups: [BlurbGroup]) {
-        guard let answer = homeAnswerDraft else { return }
+    private func applyHomeAnswer(to groups: [BlurbGroup]) async -> Bool {
+        guard let answer = homeAnswerDraft else { return false }
         let imageData = homeImageDraft
-        Task {
-            for group in groups {
-                if let existing = await blurbStore.existingAnswer(promptID: todayPrompt.id, in: group.id) {
-                    conflictingGroupName = group.name
-                    conflictingHomePost = existing
-                    return
-                }
-            }
-
-            for group in groups {
-                _ = await blurbStore.createPost(
+        for group in groups {
+            let succeeded: Bool
+            if let existing = await blurbStore.existingAnswer(promptID: todayPrompt.id, in: group.id) {
+                succeeded = await blurbStore.overwritePost(existing, answer: answer, imageData: imageData)
+            } else {
+                succeeded = await blurbStore.createPost(
                     answer: answer,
                     imageData: imageData,
                     prompt: todayPrompt,
                     in: group.id
                 )
             }
-            clearHomeDraft()
+            guard succeeded else { return false }
         }
+        clearHomeDraft()
+        return true
     }
 
     private func clearHomeDraft() {
@@ -268,11 +246,92 @@ struct ContentView: View {
         homeImageDraft = nil
     }
 
-    private func openConflictingAnswer(blank: Bool) {
-        guard let conflictingHomePost else { return }
-        startsHomeEditBlank = blank
-        homePostToEdit = conflictingHomePost
-        self.conflictingHomePost = nil
+}
+
+private struct HomeAudiencePicker: View {
+    @Environment(\.dismiss) private var dismiss
+    let groups: [BlurbGroup]
+    let apply: ([BlurbGroup]) async -> Bool
+    @State private var selectedGroupIDs: Set<String>
+    @State private var isApplying = false
+    @State private var showingOverwriteWarning = false
+
+    init(groups: [BlurbGroup], apply: @escaping ([BlurbGroup]) async -> Bool) {
+        self.groups = groups
+        self.apply = apply
+        _selectedGroupIDs = State(initialValue: Set(groups.map(\.id)))
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    ForEach(groups) { group in
+                        Button {
+                            if selectedGroupIDs.contains(group.id) {
+                                selectedGroupIDs.remove(group.id)
+                            } else {
+                                selectedGroupIDs.insert(group.id)
+                            }
+                        } label: {
+                            HStack {
+                                Text(group.name)
+                                    .foregroundStyle(.primary)
+                                Spacer()
+                                Image(systemName: selectedGroupIDs.contains(group.id) ? "checkmark.circle.fill" : "circle")
+                                    .foregroundStyle(selectedGroupIDs.contains(group.id) ? .indigo : .secondary)
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                } header: {
+                    Text("Share with")
+                } footer: {
+                    Text("If you already answered today in a selected group, that answer will be replaced. Replies and reactions stay with the post.")
+                }
+            }
+            .navigationTitle("Choose groups")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                        .disabled(isApplying)
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button {
+                        showingOverwriteWarning = true
+                    } label: {
+                        if isApplying {
+                            ProgressView()
+                        } else {
+                            Image(systemName: "checkmark")
+                        }
+                    }
+                    .disabled(selectedGroupIDs.isEmpty || isApplying)
+                    .accessibilityLabel("Apply answer to selected groups")
+                }
+            }
+            .confirmationDialog(
+                "Apply this answer to the selected groups?",
+                isPresented: $showingOverwriteWarning,
+                titleVisibility: .visible
+            ) {
+                Button("Apply answer") { submit() }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Existing answers will be overwritten. You may lose your first-place badge because editing refreshes the timestamp, and each answer can only be edited once per day.")
+            }
+        }
+    }
+
+    private func submit() {
+        let selectedGroups = groups.filter { selectedGroupIDs.contains($0.id) }
+        isApplying = true
+        Task {
+            if await apply(selectedGroups) { dismiss() }
+            isApplying = false
+        }
     }
 }
 
@@ -670,7 +729,7 @@ struct PostCard: View {
                             Image(systemName: "medal.fill")
                                 .font(.caption)
                                 .foregroundStyle(rankColor)
-                                .accessibilityLabel(post.placementLabel ?? "Ranked answer")
+                                .accessibilityLabel(placementLabel ?? "Ranked answer")
                         }
                     }
 
@@ -838,10 +897,23 @@ struct PostCard: View {
     }
 
     private var rankColor: Color? {
-        switch post.answerRank {
+        switch currentRank {
         case 1: return Color(red: 0.92, green: 0.68, blue: 0.05)
         case 2: return Color.gray
         case 3: return Color(red: 0.65, green: 0.38, blue: 0.18)
+        default: return nil
+        }
+    }
+
+    private var currentRank: Int {
+        blurbStore.currentAnswerRank(for: post)
+    }
+
+    private var placementLabel: String? {
+        switch currentRank {
+        case 1: return "1st place!"
+        case 2: return "2nd place"
+        case 3: return "3rd place"
         default: return nil
         }
     }
@@ -980,6 +1052,7 @@ struct NewPostView: View {
     @State private var composerHeight: CGFloat = 58
     @State private var photoItem: PhotosPickerItem?
     @State private var photoData: Data?
+    @State private var showingEditWarning = false
     let prompt: String
     let initialAnswer: String?
     let themeSeed: String
@@ -1063,7 +1136,13 @@ struct NewPostView: View {
                             )
                         )
 
-                        Button(action: submitAnswer) {
+                        Button {
+                            if initialAnswer == nil {
+                                submitAnswer()
+                            } else {
+                                showingEditWarning = true
+                            }
+                        } label: {
                             Group {
                                 if isSubmitting {
                                     ProgressView()
@@ -1091,7 +1170,7 @@ struct NewPostView: View {
 
                     Text(initialAnswer == nil
                          ? "Once you post, your answer counts toward today’s streak."
-                         : "You can edit once. Editing refreshes the timestamp and removes this answer from your streak.")
+                         : "You can edit once per day. Editing refreshes the timestamp, removes this answer from your streak, and may cost your first-place badge.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
@@ -1121,6 +1200,16 @@ struct NewPostView: View {
                     guard let original = try? await item?.loadTransferable(type: Data.self) else { return }
                     photoData = preparedJPEG(from: original)
                 }
+            }
+            .confirmationDialog(
+                "Save this edit?",
+                isPresented: $showingEditWarning,
+                titleVisibility: .visible
+            ) {
+                Button("Save edit") { submitAnswer() }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("You can only edit once per day. Editing refreshes the timestamp, so you may lose your first-place badge.")
             }
         }
     }
@@ -1618,7 +1707,7 @@ struct ProfileView: View {
                             ProfilePhoto(urlString: blurbStore.profile.photoURL, size: 76)
                             Text(blurbStore.profile.displayName)
                                 .font(.title.bold())
-                            Text("Your Blurb profile")
+                            Text("Your Daily Blurb profile")
                                 .foregroundStyle(.secondary)
 
                             Button("Edit profile") { showingEditProfile = true }
@@ -2122,7 +2211,7 @@ private struct GroupOnboardingView: View {
                 Text("Find your people.")
                     .font(.system(size: 42, weight: .bold, design: .serif))
 
-                Text("Blurb happens inside private groups. Start a new circle or use an invite code to join one.")
+                Text("Daily Blurb happens inside private groups. Start a new circle or use an invite code to join one.")
                     .font(.title3)
                     .foregroundStyle(.secondary)
 

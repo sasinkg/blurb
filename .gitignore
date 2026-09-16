@@ -1,0 +1,12 @@
+# macOS metadata (especially on the T7 volume)
+.DS_Store
+._*
+
+# Xcode build products and archives
+DerivedData/
+.screenshot-derived-data/
+.screenshot-derived-data-old/
+*.xcarchive
+
+# Firebase local deployment cache
+.firebase/
