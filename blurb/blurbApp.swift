@@ -24,12 +24,14 @@ enum AppAppearance: String, CaseIterable, Identifiable {
 
 @main
 struct blurbApp: App {
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var auth: AuthManager
     @StateObject private var blurbStore: BlurbStore
     @AppStorage("appAppearance") private var appAppearance = AppAppearance.system.rawValue
 
     init() {
         FirebaseApp.configure()
+        NotificationManager.shared.configure()
         let authManager = AuthManager()
         let store = BlurbStore()
 #if DEBUG

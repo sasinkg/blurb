@@ -67,6 +67,7 @@ struct ContentView: View {
     @State private var showingHomeAudience = false
     @State private var homeAnswerDraft: String?
     @State private var homeImageDraft: Data?
+    @State private var dailyPromptClock = Date.now
     @AppStorage("birthdayQuestionsEnabled") private var birthdayQuestionsEnabled = false
     @AppStorage("birthdayQuestion") private var birthdayQuestion = ""
     @AppStorage("birthdayTimestamp") private var birthdayTimestamp = Date.now.timeIntervalSince1970
@@ -91,6 +92,12 @@ struct ContentView: View {
                 if await auth.refreshSession() {
                     blurbStore.start(for: userID)
                 }
+            }
+        }
+        .task {
+            while !Task.isCancelled {
+                dailyPromptClock = .now
+                try? await Task.sleep(for: .seconds(60))
             }
         }
         .fullScreenCover(isPresented: Binding(
@@ -188,7 +195,8 @@ struct ContentView: View {
                     prompt: todayPrompt.question,
                     initialAnswer: nil,
                     themeSeed: todayPrompt.id,
-                    requiresPhoto: todayPrompt.requiresPhoto
+                    requiresPhoto: todayPrompt.requiresPhoto,
+                    pollOptions: todayPrompt.pollOptions
                 ) { answer, imageData in
                     homeAnswerDraft = answer
                     homeImageDraft = imageData
@@ -210,6 +218,7 @@ struct ContentView: View {
 
     private var todayPrompt: DailyPrompt {
         QuestionBank.prompt(
+            for: dailyPromptClock,
             birthdayPrompt: birthdayQuestion,
             birthday: birthdayQuestionsEnabled ? Date(timeIntervalSince1970: birthdayTimestamp) : nil
         )
@@ -497,6 +506,7 @@ private struct GroupFeedView: View {
     @State private var answerToReuse: String?
     @State private var imageToReuse: Data?
     @State private var showingReuseOptions = false
+    @State private var dailyPromptClock = Date.now
     @AppStorage("birthdayQuestionsEnabled") private var birthdayQuestionsEnabled = false
     @AppStorage("birthdayQuestion") private var birthdayQuestion = ""
     @AppStorage("birthdayTimestamp") private var birthdayTimestamp = Date.now.timeIntervalSince1970
@@ -519,13 +529,30 @@ private struct GroupFeedView: View {
         }
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                NavigationLink {
+                    GroupNewsletterHomeView(group: group)
+                } label: {
+                    Image(systemName: "newspaper.fill")
+                }
+                .accessibilityLabel("\(group.name) newsletter")
+            }
+        }
         .onAppear { blurbStore.select(group) }
+        .task {
+            while !Task.isCancelled {
+                dailyPromptClock = .now
+                try? await Task.sleep(for: .seconds(60))
+            }
+        }
         .sheet(isPresented: $showingNewPost, onDismiss: offerReuseIfAvailable) {
             NewPostView(
                 prompt: todayPrompt.question,
                 initialAnswer: nil,
                 themeSeed: group.name,
-                requiresPhoto: todayPrompt.requiresPhoto
+                requiresPhoto: todayPrompt.requiresPhoto,
+                pollOptions: todayPrompt.pollOptions
             ) { answer, imageData in
                 let posted = await blurbStore.createPost(answer: answer, imageData: imageData, prompt: todayPrompt, in: group.id)
                 if posted {
@@ -537,7 +564,7 @@ private struct GroupFeedView: View {
             .presentationBackground(.ultraThinMaterial)
         }
         .sheet(item: $postToEdit) { post in
-            NewPostView(prompt: post.prompt, initialAnswer: post.answer, themeSeed: group.name) { answer, _ in
+            NewPostView(prompt: post.prompt, initialAnswer: post.answer, themeSeed: group.name, pollOptions: post.pollOptions) { answer, _ in
                 await blurbStore.editPost(post, answer: answer)
             }
             .presentationBackground(.ultraThinMaterial)
@@ -666,6 +693,7 @@ private struct GroupFeedView: View {
 
     private var todayPrompt: DailyPrompt {
         QuestionBank.prompt(
+            for: dailyPromptClock,
             birthdayPrompt: birthdayQuestion,
             birthday: birthdayQuestionsEnabled ? Date(timeIntervalSince1970: birthdayTimestamp) : nil
         )
@@ -1057,6 +1085,7 @@ struct NewPostView: View {
     let initialAnswer: String?
     let themeSeed: String
     let requiresPhoto: Bool
+    let pollOptions: [String]
     let onPost: (String, Data?) async -> Bool
 
     init(
@@ -1064,12 +1093,14 @@ struct NewPostView: View {
         initialAnswer: String?,
         themeSeed: String,
         requiresPhoto: Bool = false,
+        pollOptions: [String] = [],
         onPost: @escaping (String, Data?) async -> Bool
     ) {
         self.prompt = prompt
         self.initialAnswer = initialAnswer
         self.themeSeed = themeSeed
         self.requiresPhoto = requiresPhoto
+        self.pollOptions = pollOptions
         self.onPost = onPost
         _answer = State(initialValue: initialAnswer ?? "")
     }
@@ -1116,6 +1147,7 @@ struct NewPostView: View {
                         }
                     }
 
+                    if pollOptions.isEmpty {
                     HStack(alignment: .top, spacing: 10) {
                         ZStack(alignment: .leading) {
                             if answer.isEmpty {
@@ -1167,6 +1199,43 @@ struct NewPostView: View {
                         .accessibilityLabel(initialAnswer == nil ? "Post answer" : "Save edited answer")
                     }
                     .animation(.spring(response: 0.32, dampingFraction: 0.82), value: composerHeight)
+                    } else {
+                        VStack(spacing: 10) {
+                            ForEach(pollOptions, id: \.self) { option in
+                                Button {
+                                    answer = option
+                                } label: {
+                                    HStack {
+                                        Text(option)
+                                            .font(.headline)
+                                        Spacer()
+                                        Image(systemName: answer == option ? "checkmark.circle.fill" : "circle")
+                                            .font(.title3)
+                                    }
+                                    .foregroundStyle(.primary)
+                                    .padding(15)
+                                    .background(
+                                        answer == option
+                                            ? Color(red: 1, green: 0.78, blue: 0.02).opacity(0.34)
+                                            : Color.primary.opacity(0.06),
+                                        in: RoundedRectangle(cornerRadius: 14)
+                                    )
+                                }
+                                .buttonStyle(.plain)
+                            }
+
+                            Button(initialAnswer == nil ? "Submit vote" : "Save vote") {
+                                if initialAnswer == nil {
+                                    submitAnswer()
+                                } else {
+                                    showingEditWarning = true
+                                }
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .tint(.black)
+                            .disabled(!canSubmit)
+                        }
+                    }
 
                     Text(initialAnswer == nil
                          ? "Once you post, your answer counts toward today’s streak."
@@ -1689,7 +1758,6 @@ struct ProfileView: View {
     @Environment(\.colorScheme) private var colorScheme
     @EnvironmentObject private var auth: AuthManager
     @EnvironmentObject private var blurbStore: BlurbStore
-    private let nextReportDate = Calendar.current.date(byAdding: .day, value: 3, to: Calendar.current.date(byAdding: .month, value: 1, to: Date.now) ?? .now) ?? .now
     @State private var showingEditProfile = false
 
     private var currentMonthPointsLabel: String {
@@ -1756,18 +1824,6 @@ struct ProfileView: View {
                                 .stroke(colorScheme == .dark ? Color.white.opacity(0.16) : .black, lineWidth: 1.5)
                         }
 
-                        VStack(alignment: .leading, spacing: 10) {
-                            Label("Monthly report", systemImage: "sparkles.rectangle.stack")
-                                .font(.headline)
-                                .foregroundStyle(.indigo)
-                            Text("Your next private recap is scheduled for \(nextReportDate.formatted(date: .abbreviated, time: .omitted)).")
-                                .foregroundStyle(.secondary)
-                            Text("It will collect your newsletter-marked blurbs, group highlights, and progress toward badges.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        .padding(18)
-                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22))
                     }
                     .padding()
                 }
@@ -1965,7 +2021,8 @@ struct BadgeRow: View {
 struct SettingsView: View {
     @EnvironmentObject private var auth: AuthManager
     @EnvironmentObject private var blurbStore: BlurbStore
-    @AppStorage("dailyReminderEnabled") private var dailyReminderEnabled = true
+    @AppStorage("dailyReminderEnabled") private var dailyReminderEnabled = false
+    @AppStorage("replyNotificationsEnabled") private var replyNotificationsEnabled = false
     @AppStorage("weeklyTriviaEnabled") private var weeklyTriviaEnabled = true
     @AppStorage("monthlyReportEnabled") private var monthlyReportEnabled = true
     @AppStorage("appAppearance") private var appAppearance = AppAppearance.system.rawValue
@@ -1975,6 +2032,7 @@ struct SettingsView: View {
     @State private var copiedGroupName: String?
     @State private var showingDeleteAccount = false
     @State private var isDeletingAccount = false
+    @State private var reminderErrorMessage: String?
 
     var body: some View {
         NavigationStack {
@@ -2027,7 +2085,17 @@ struct SettingsView: View {
 
                         settingsCard(title: "REMINDERS") {
                             Toggle("Daily Blurb reminder", isOn: $dailyReminderEnabled)
+                                .onChange(of: dailyReminderEnabled) { _, enabled in
+                                    updateDailyReminder(enabled: enabled)
+                                }
+                            Text("Get a reminder every day at 7:00 PM.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                             Toggle("Weekly Trivia", isOn: $weeklyTriviaEnabled)
+                            Toggle("Replies to your answers", isOn: $replyNotificationsEnabled)
+                                .onChange(of: replyNotificationsEnabled) { _, enabled in
+                                    updateReplyNotifications(enabled: enabled)
+                                }
                         }
 
                         settingsCard(title: "REPORTS") {
@@ -2035,6 +2103,16 @@ struct SettingsView: View {
                             Text("Reports are planned to arrive a few days after each month ends.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
+                            Divider()
+                            NavigationLink {
+                                DemoMonthlyNewsletterView(
+                                    displayName: blurbStore.profile.displayName,
+                                    groupName: blurbStore.selectedGroup?.name ?? "Roomies"
+                                )
+                            } label: {
+                                Label("Open demo newsletter", systemImage: "newspaper.fill")
+                                    .font(.subheadline.bold())
+                            }
                         }
 
                         settingsCard(title: "PRIVACY") {
@@ -2104,6 +2182,58 @@ struct SettingsView: View {
                 Button("Cancel", role: .cancel) {}
             } message: {
                 Text("This removes your profile, photos, answers, and group memberships. This cannot be undone.")
+            }
+            .alert("Daily reminder", isPresented: Binding(
+                get: { reminderErrorMessage != nil },
+                set: { if !$0 { reminderErrorMessage = nil } }
+            )) {
+                Button("OK", role: .cancel) { reminderErrorMessage = nil }
+            } message: {
+                Text(reminderErrorMessage ?? "Please try again.")
+            }
+            .task {
+                guard dailyReminderEnabled else { return }
+                let restored = await NotificationManager.shared.restoreDailyReminderIfAuthorized()
+                if !restored {
+                    dailyReminderEnabled = false
+                }
+            }
+            .task {
+                guard replyNotificationsEnabled else { return }
+                let restored = await NotificationManager.shared.restoreReplyNotificationsIfAuthorized()
+                if !restored {
+                    replyNotificationsEnabled = false
+                }
+            }
+        }
+    }
+
+    private func updateDailyReminder(enabled: Bool) {
+        if enabled {
+            Task {
+                do {
+                    try await NotificationManager.shared.enableDailyReminder()
+                } catch {
+                    dailyReminderEnabled = false
+                    reminderErrorMessage = error.localizedDescription
+                }
+            }
+        } else {
+            NotificationManager.shared.disableDailyReminder()
+        }
+    }
+
+    private func updateReplyNotifications(enabled: Bool) {
+        guard enabled else {
+            Task { await NotificationManager.shared.disableReplyNotifications() }
+            return
+        }
+        Task {
+            do {
+                try await NotificationManager.shared.enableReplyNotifications()
+            } catch {
+                replyNotificationsEnabled = false
+                reminderErrorMessage = error.localizedDescription
             }
         }
     }

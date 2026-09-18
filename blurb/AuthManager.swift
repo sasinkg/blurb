@@ -70,10 +70,14 @@ final class AuthManager: ObservableObject {
     }
 
     func signOut() {
-        do {
-            try Auth.auth().signOut()
-        } catch {
-            errorMessage = error.localizedDescription
+        guard let userID = user?.uid else { return }
+        Task {
+            await NotificationManager.shared.removeReplyToken(for: userID)
+            do {
+                try Auth.auth().signOut()
+            } catch {
+                errorMessage = error.localizedDescription
+            }
         }
     }
 

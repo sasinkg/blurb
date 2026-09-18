@@ -120,5 +120,10 @@ service cloud.firestore {
         );
       }
     }
+
+    match /newsletterEditions/{editionID} {
+      allow read: if signedIn() && request.auth.uid in resource.data.viewerIDs;
+      allow write: if false;
+    }
   }
 }

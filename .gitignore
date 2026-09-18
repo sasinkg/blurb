@@ -10,3 +10,5 @@ DerivedData/
 
 # Firebase local deployment cache
 .firebase/
+functions/node_modules/
+firebase-debug.log

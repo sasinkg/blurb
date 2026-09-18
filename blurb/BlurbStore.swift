@@ -24,6 +24,8 @@ struct BlurbPost: Identifiable, Hashable {
     let answer: String
     let prompt: String
     let promptID: String
+    let pollOptions: [String]
+    let isMonthlyReportPrompt: Bool
     let createdAt: Date
     let editedAt: Date?
     let editCount: Int
@@ -73,6 +75,27 @@ struct BlurbProfile {
     var photoURL: String?
 }
 
+struct NewsletterEntry: Identifiable, Hashable {
+    let id: String
+    let authorName: String
+    let answer: String
+    let prompt: String
+    let promptID: String
+    let imageURL: String?
+    let createdAt: Date
+}
+
+struct NewsletterEdition: Identifiable, Hashable {
+    let id: String
+    let groupID: String
+    let groupName: String
+    let monthKey: String
+    let monthLabel: String
+    let entries: [NewsletterEntry]
+    let mostAnswersWinner: String?
+    let mostPointsWinner: String?
+}
+
 @MainActor
 final class BlurbStore: ObservableObject {
     @Published private(set) var groups: [BlurbGroup] = []
@@ -81,6 +104,7 @@ final class BlurbStore: ObservableObject {
     @Published private(set) var answerCountsByGroup: [String: Int] = [:]
     @Published private(set) var profile = BlurbProfile()
     @Published private(set) var commentsByPostID: [String: [BlurbComment]] = [:]
+    @Published private(set) var newsletterEditions: [NewsletterEdition] = []
     @Published var selectedGroupID: String?
     @Published var errorMessage: String?
     @Published private(set) var listenerErrorMessage: String?
@@ -89,6 +113,7 @@ final class BlurbStore: ObservableObject {
     private var groupsListener: ListenerRegistration?
     private var postsListener: ListenerRegistration?
     private var profileListener: ListenerRegistration?
+    private var newsletterListener: ListenerRegistration?
     private var answerCountListeners: [String: ListenerRegistration] = [:]
     private var commentListeners: [String: ListenerRegistration] = [:]
     private var currentUserID: String?
@@ -228,6 +253,23 @@ final class BlurbStore: ObservableObject {
                     )
                 }
             }
+
+        newsletterListener = database.collection("newsletterEditions")
+            .whereField("viewerIDs", arrayContains: userID)
+            .addSnapshotListener { [weak self] snapshot, error in
+                guard let self, self.listenerGeneration == generation else { return }
+                if let error {
+                    Task { @MainActor in
+                        self.recordListenerError(error, source: "newsletter-editions")
+                    }
+                    return
+                }
+                let editions = snapshot?.documents.compactMap(Self.makeNewsletterEdition) ?? []
+                Task { @MainActor in
+                    self.clearListenerError(source: "newsletter-editions")
+                    self.newsletterEditions = editions.sorted { $0.monthKey > $1.monthKey }
+                }
+            }
     }
 
     func invalidateListeners() {
@@ -236,6 +278,7 @@ final class BlurbStore: ObservableObject {
         groupsListener?.remove(); groupsListener = nil
         postsListener?.remove(); postsListener = nil
         profileListener?.remove(); profileListener = nil
+        newsletterListener?.remove(); newsletterListener = nil
         answerCountListeners.values.forEach { $0.remove() }
         answerCountListeners = [:]
         commentListeners.values.forEach { $0.remove() }
@@ -248,7 +291,7 @@ final class BlurbStore: ObservableObject {
         invalidateListeners()
         currentUserID = nil
         activeAnswerCountPromptID = nil
-        groups = []; groupsLoaded = false; posts = []; answerCountsByGroup = [:]; commentsByPostID = [:]; selectedGroupID = nil
+        groups = []; groupsLoaded = false; posts = []; answerCountsByGroup = [:]; commentsByPostID = [:]; newsletterEditions = []; selectedGroupID = nil
         errorMessage = nil
         listenerErrors = [:]
         listenerErrorMessage = nil
@@ -458,6 +501,7 @@ final class BlurbStore: ObservableObject {
                 "answer": trimmedAnswer,
                 "prompt": prompt.question,
                 "promptID": prompt.id,
+                "pollOptions": prompt.pollOptions,
                 "isMonthlyReportPrompt": prompt.isNewsletterFeature,
                 "createdAt": FieldValue.serverTimestamp(),
                 "editCount": 0,
@@ -484,6 +528,9 @@ final class BlurbStore: ObservableObject {
             sharedValues["groupID"] = targetGroupID
             let reference = database.collection("posts").document(entryID)
             try await reference.setData(sharedValues)
+            if UserDefaults.standard.bool(forKey: "dailyReminderEnabled") {
+                NotificationManager.shared.markAnsweredToday()
+            }
             return true
         } catch {
             errorMessage = error.localizedDescription
@@ -770,9 +817,9 @@ final class BlurbStore: ObservableObject {
         answerCountsByGroup = ["roomies": 4, "family": 2, "college": 4]
         profile = BlurbProfile(displayName: "Alex", photoURL: nil)
         posts = [
-            BlurbPost(id: "post-alex", entryID: "post-alex", groupID: group.id, authorID: userID, authorName: "Alex", authorPhotoURL: nil, imageURL: nil, answer: "A quiet cup of coffee before everyone woke up.", prompt: prompt.question, promptID: prompt.id, createdAt: now.addingTimeInterval(-300), editedAt: nil, editCount: 0, countsTowardStreak: true, likeIDs: ["maya", "jordan"], answerRank: 1, pointsAwarded: 3, commentCount: 2),
-            BlurbPost(id: "post-maya", entryID: "post-maya", groupID: group.id, authorID: "maya", authorName: "Maya", authorPhotoURL: nil, imageURL: nil, answer: "The coffee shop remembered my order ☕️", prompt: prompt.question, promptID: prompt.id, createdAt: now.addingTimeInterval(-240), editedAt: nil, editCount: 0, countsTowardStreak: true, likeIDs: [userID, "sam"], answerRank: 2, pointsAwarded: 2, commentCount: 1),
-            BlurbPost(id: "post-jordan", entryID: "post-jordan", groupID: group.id, authorID: "jordan", authorName: "Jordan", authorPhotoURL: nil, imageURL: nil, answer: "Ten minutes of sunshine between meetings.", prompt: prompt.question, promptID: prompt.id, createdAt: now.addingTimeInterval(-180), editedAt: nil, editCount: 0, countsTowardStreak: true, likeIDs: ["maya"], answerRank: 3, pointsAwarded: 1, commentCount: 0)
+            BlurbPost(id: "post-alex", entryID: "post-alex", groupID: group.id, authorID: userID, authorName: "Alex", authorPhotoURL: nil, imageURL: nil, answer: "A quiet cup of coffee before everyone woke up.", prompt: prompt.question, promptID: prompt.id, pollOptions: [], isMonthlyReportPrompt: false, createdAt: now.addingTimeInterval(-300), editedAt: nil, editCount: 0, countsTowardStreak: true, likeIDs: ["maya", "jordan"], answerRank: 1, pointsAwarded: 3, commentCount: 2),
+            BlurbPost(id: "post-maya", entryID: "post-maya", groupID: group.id, authorID: "maya", authorName: "Maya", authorPhotoURL: nil, imageURL: nil, answer: "The coffee shop remembered my order ☕️", prompt: prompt.question, promptID: prompt.id, pollOptions: [], isMonthlyReportPrompt: false, createdAt: now.addingTimeInterval(-240), editedAt: nil, editCount: 0, countsTowardStreak: true, likeIDs: [userID, "sam"], answerRank: 2, pointsAwarded: 2, commentCount: 1),
+            BlurbPost(id: "post-jordan", entryID: "post-jordan", groupID: group.id, authorID: "jordan", authorName: "Jordan", authorPhotoURL: nil, imageURL: nil, answer: "Ten minutes of sunshine between meetings.", prompt: prompt.question, promptID: prompt.id, pollOptions: [], isMonthlyReportPrompt: false, createdAt: now.addingTimeInterval(-180), editedAt: nil, editCount: 0, countsTowardStreak: true, likeIDs: ["maya"], answerRank: 3, pointsAwarded: 1, commentCount: 0)
         ]
         commentsByPostID = [
             "post-alex": [
@@ -846,6 +893,8 @@ final class BlurbStore: ObservableObject {
             answer: answer,
             prompt: prompt,
             promptID: data["promptID"] as? String ?? "legacy-\(id)",
+            pollOptions: data["pollOptions"] as? [String] ?? [],
+            isMonthlyReportPrompt: data["isMonthlyReportPrompt"] as? Bool ?? false,
             createdAt: (data["createdAt"] as? Timestamp)?.dateValue() ?? .now,
             editedAt: (data["editedAt"] as? Timestamp)?.dateValue(),
             editCount: data["editCount"] as? Int ?? 0,
@@ -869,6 +918,41 @@ final class BlurbStore: ObservableObject {
             authorPhotoURL: data["authorPhotoURL"] as? String,
             text: text,
             createdAt: (data["createdAt"] as? Timestamp)?.dateValue() ?? .now
+        )
+    }
+
+    private static func makeNewsletterEdition(_ document: QueryDocumentSnapshot) -> NewsletterEdition? {
+        let data = document.data()
+        guard let groupID = data["groupID"] as? String,
+              let groupName = data["groupName"] as? String,
+              let monthKey = data["monthKey"] as? String,
+              let monthLabel = data["monthLabel"] as? String else { return nil }
+        let entries = (data["entries"] as? [[String: Any]] ?? []).compactMap { entry -> NewsletterEntry? in
+            guard let postID = entry["postID"] as? String,
+                  let authorName = entry["authorName"] as? String,
+                  let prompt = entry["prompt"] as? String else { return nil }
+            return NewsletterEntry(
+                id: postID,
+                authorName: authorName,
+                answer: entry["answer"] as? String ?? "",
+                prompt: prompt,
+                promptID: entry["promptID"] as? String ?? postID,
+                imageURL: entry["imageURL"] as? String,
+                createdAt: (entry["createdAt"] as? Timestamp)?.dateValue() ?? .now
+            )
+        }
+        let winners = data["winners"] as? [String: Any]
+        let mostAnswers = winners?["mostAnswers"] as? [String: Any]
+        let mostPoints = winners?["mostPoints"] as? [String: Any]
+        return NewsletterEdition(
+            id: document.documentID,
+            groupID: groupID,
+            groupName: groupName,
+            monthKey: monthKey,
+            monthLabel: monthLabel,
+            entries: entries,
+            mostAnswersWinner: mostAnswers?["name"] as? String,
+            mostPointsWinner: mostPoints?["name"] as? String
         )
     }
 

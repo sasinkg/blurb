@@ -11,6 +11,7 @@
 		A1B10000000000000000000002 /* FirebaseCore in Frameworks */ = {isa = PBXBuildFile; productRef = A1B10000000000000000000012 /* FirebaseCore */; };
 		A1B10000000000000000000003 /* FirebaseFirestore in Frameworks */ = {isa = PBXBuildFile; productRef = A1B10000000000000000000013 /* FirebaseFirestore */; };
 		A1B10000000000000000000004 /* FirebaseStorage in Frameworks */ = {isa = PBXBuildFile; productRef = A1B10000000000000000000014 /* FirebaseStorage */; };
+		A1B10000000000000000000005 /* FirebaseMessaging in Frameworks */ = {isa = PBXBuildFile; productRef = A1B10000000000000000000015 /* FirebaseMessaging */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -63,6 +64,7 @@
 				A1B10000000000000000000002 /* FirebaseCore in Frameworks */,
 				A1B10000000000000000000003 /* FirebaseFirestore in Frameworks */,
 				A1B10000000000000000000004 /* FirebaseStorage in Frameworks */,
+				A1B10000000000000000000005 /* FirebaseMessaging in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -127,6 +129,7 @@
 				A1B10000000000000000000012 /* FirebaseCore */,
 				A1B10000000000000000000013 /* FirebaseFirestore */,
 				A1B10000000000000000000014 /* FirebaseStorage */,
+				A1B10000000000000000000015 /* FirebaseMessaging */,
 			);
 			productName = blurb;
 			productReference = 8E52B778303F73E200079CF4 /* blurb.app */;
@@ -190,6 +193,11 @@
 				TargetAttributes = {
 					8E52B777303F73E200079CF4 = {
 						CreatedOnToolsVersion = 16.4;
+						SystemCapabilities = {
+							com.apple.Push = {
+								enabled = 1;
+							};
+						};
 					};
 					8E52B785303F73E300079CF4 = {
 						CreatedOnToolsVersion = 16.4;
@@ -639,6 +647,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = A1B10000000000000000000021 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
 			productName = FirebaseStorage;
+		};
+		A1B10000000000000000000015 /* FirebaseMessaging */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A1B10000000000000000000021 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
+			productName = FirebaseMessaging;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

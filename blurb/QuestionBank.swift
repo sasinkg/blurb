@@ -14,17 +14,20 @@ struct DailyPrompt: Identifiable, Hashable {
     let kind: PromptKind
     let isNewsletterFeature: Bool
     let acceptedAnswers: [String]
+    let pollOptions: [String]
 
-    init(id: String, question: String, kind: PromptKind, isNewsletterFeature: Bool, acceptedAnswers: [String] = []) {
+    init(id: String, question: String, kind: PromptKind, isNewsletterFeature: Bool, acceptedAnswers: [String] = [], pollOptions: [String] = []) {
         self.id = id
         self.question = question
         self.kind = kind
         self.isNewsletterFeature = isNewsletterFeature
         self.acceptedAnswers = acceptedAnswers
+        self.pollOptions = pollOptions
     }
 
     var requiresPhoto: Bool { id.contains("hidden-report-photo") }
     var isTrivia: Bool { kind == .trivia }
+    var isPoll: Bool { !pollOptions.isEmpty }
     var allowsEditing: Bool { !isTrivia }
 
     func isCorrect(_ answer: String) -> Bool {
@@ -42,6 +45,17 @@ struct DailyPrompt: Identifiable, Hashable {
 }
 
 enum QuestionBank {
+    private static var pacificCalendar: Calendar {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "America/Los_Angeles")!
+        return calendar
+    }
+
+    /// Treat midnight through 4:59 AM Pacific as part of the prior content day.
+    private static func contentDate(for date: Date) -> Date {
+        pacificCalendar.date(byAdding: .hour, value: -5, to: date) ?? date
+    }
+
     private static let weeklyReflectionPrompts = [
         "What is one moment from this week you want to remember?",
         "Post a picture of yourself from this month.",
@@ -178,27 +192,240 @@ enum QuestionBank {
     }()
 
     static func prompt(for date: Date = .now, birthdayPrompt: String? = nil, birthday: Date? = nil) -> DailyPrompt {
-        let calendar = Calendar.current
-        let thursdayNumber = (calendar.component(.day, from: date) - 1) / 7 + 1
-        if calendar.component(.weekday, from: date) == 5 && thursdayNumber <= 4 {
-            return weeklyTrivia(for: date)
+        let calendar = pacificCalendar
+        let effectiveDate = contentDate(for: date)
+
+        if let holidayPrompt = fixedHolidayPrompt(for: effectiveDate, calendar: calendar) {
+            return holidayPrompt
         }
 
-        if let birthday, calendar.component(.month, from: birthday) == calendar.component(.month, from: date), calendar.component(.day, from: birthday) == calendar.component(.day, from: date) {
+        if let pollPrompt = monthlyPollPrompt(for: effectiveDate, calendar: calendar) {
+            return pollPrompt
+        }
+
+        if let newsletterPrompt = monthlyNewsletterPrompt(for: effectiveDate, calendar: calendar) {
+            return newsletterPrompt
+        }
+
+        if let photoPrompt = monthlyPhotoPrompt(for: effectiveDate, calendar: calendar) {
+            return photoPrompt
+        }
+
+        let thursdayNumber = (calendar.component(.day, from: effectiveDate) - 1) / 7 + 1
+        if calendar.component(.weekday, from: effectiveDate) == 5 && thursdayNumber <= 4 {
+            return weeklyTriviaForEffectiveDate(effectiveDate)
+        }
+
+        if let birthday, calendar.component(.month, from: birthday) == calendar.component(.month, from: effectiveDate), calendar.component(.day, from: birthday) == calendar.component(.day, from: effectiveDate) {
             let custom = birthdayPrompt?.trimmingCharacters(in: .whitespacesAndNewlines)
             return DailyPrompt(id: "birthday-today", question: custom?.isEmpty == false ? custom! : bonusPrompts[0], kind: .birthday, isNewsletterFeature: false)
         }
 
-        let month = calendar.component(.month, from: date) - 1
+        let month = calendar.component(.month, from: effectiveDate) - 1
         let monthlyQuestions = questions.filter {
             $0.kind != .featured && ($0.id.contains("-\(month)-") || $0.id.contains("-\(Calendar.current.monthSymbols[month])-"))
         }
-        let day = calendar.component(.day, from: date) - 1
+        let day = calendar.component(.day, from: effectiveDate) - 1
         return monthlyQuestions[day % monthlyQuestions.count]
     }
 
+    private static func fixedHolidayPrompt(for date: Date, calendar: Calendar) -> DailyPrompt? {
+        let year = calendar.component(.year, from: date)
+        let month = calendar.component(.month, from: date)
+        let day = calendar.component(.day, from: date)
+
+        if month == 7 && day == 4 {
+            return DailyPrompt(
+                id: "holiday-\(year)-july-4",
+                question: "How are you celebrating the Fourth of July?",
+                kind: .timely,
+                isNewsletterFeature: false
+            )
+        }
+
+        if month == 5 && day == 31 {
+            return DailyPrompt(
+                id: "seasonal-\(year)-summer-preview",
+                question: "What are you excited about for summer?",
+                kind: .timely,
+                isNewsletterFeature: false
+            )
+        }
+
+        if month == 3 && day == 1 {
+            return DailyPrompt(
+                id: "seasonal-\(year)-winter-recap",
+                question: "How was your winter?",
+                kind: .featured,
+                isNewsletterFeature: true
+            )
+        }
+
+        if month == 6 && day == 1 {
+            return DailyPrompt(
+                id: "seasonal-\(year)-spring-recap",
+                question: "How was your spring?",
+                kind: .featured,
+                isNewsletterFeature: true
+            )
+        }
+
+        if month == 9 && day == 1 {
+            return DailyPrompt(
+                id: "seasonal-\(year)-summer-recap",
+                question: "How was your summer?",
+                kind: .featured,
+                isNewsletterFeature: true
+            )
+        }
+
+        if month == 11 && day == 30 {
+            return DailyPrompt(
+                id: "seasonal-\(year)-fall-recap",
+                question: "How was your fall?",
+                kind: .featured,
+                isNewsletterFeature: true
+            )
+        }
+
+        var superBowlComponents = DateComponents()
+        superBowlComponents.calendar = calendar
+        superBowlComponents.timeZone = calendar.timeZone
+        superBowlComponents.year = year
+        superBowlComponents.month = 2
+        superBowlComponents.weekday = 1
+        superBowlComponents.weekdayOrdinal = 2
+
+        if let superBowlSunday = calendar.date(from: superBowlComponents),
+           calendar.isDate(date, inSameDayAs: superBowlSunday) {
+            return DailyPrompt(
+                id: "holiday-\(year)-super-bowl",
+                question: "Who do you think is going to win the Super Bowl?",
+                kind: .timely,
+                isNewsletterFeature: false
+            )
+        }
+
+        if month == 12 && day == 25 {
+            return DailyPrompt(
+                id: "holiday-\(year)-christmas",
+                question: "What do you want for Christmas?",
+                kind: .timely,
+                isNewsletterFeature: true
+            )
+        }
+
+        var thanksgivingComponents = DateComponents()
+        thanksgivingComponents.calendar = calendar
+        thanksgivingComponents.timeZone = calendar.timeZone
+        thanksgivingComponents.year = year
+        thanksgivingComponents.month = 11
+        thanksgivingComponents.weekday = 5
+        thanksgivingComponents.weekdayOrdinal = 4
+
+        if let thanksgiving = calendar.date(from: thanksgivingComponents),
+           let thanksgivingEve = calendar.date(byAdding: .day, value: -1, to: thanksgiving),
+           calendar.isDate(date, inSameDayAs: thanksgivingEve) {
+            return DailyPrompt(
+                id: "holiday-\(year)-thanksgiving-eve",
+                question: "What are you grateful for?",
+                kind: .timely,
+                isNewsletterFeature: true
+            )
+        }
+
+        return nil
+    }
+
+    private static func monthlyPollPrompt(for date: Date, calendar: Calendar) -> DailyPrompt? {
+        let year = calendar.component(.year, from: date)
+        let month = calendar.component(.month, from: date)
+        var components = DateComponents()
+        components.calendar = calendar
+        components.timeZone = calendar.timeZone
+        components.year = year
+        components.month = month
+        components.weekday = 3
+        components.weekdayOrdinal = 2
+
+        guard let pollDay = calendar.date(from: components),
+              calendar.isDate(date, inSameDayAs: pollDay) else { return nil }
+
+        let polls: [(String, [String])] = [
+            ("What is the ideal way to spend a free Saturday?", ["Stay in", "Go out", "A little of both"]),
+            ("Which meal deserves the most effort?", ["Breakfast", "Lunch", "Dinner"]),
+            ("When do you feel most like yourself?", ["Morning", "Afternoon", "Late at night"]),
+            ("Pick the group’s next adventure.", ["Beach day", "Game night", "New restaurant", "Road trip"])
+        ]
+        let poll = polls[(month - 1) % polls.count]
+        return DailyPrompt(
+            id: "poll-\(year)-\(month)",
+            question: poll.0,
+            kind: .surface,
+            isNewsletterFeature: false,
+            pollOptions: poll.1
+        )
+    }
+
+    private static func monthlyNewsletterPrompt(for date: Date, calendar: Calendar) -> DailyPrompt? {
+        let year = calendar.component(.year, from: date)
+        let month = calendar.component(.month, from: date)
+
+        for ordinal in 1...4 {
+            var components = DateComponents()
+            components.calendar = calendar
+            components.timeZone = calendar.timeZone
+            components.year = year
+            components.month = month
+            components.weekday = 4
+            components.weekdayOrdinal = ordinal
+            guard let promptDate = calendar.date(from: components),
+                  calendar.isDate(date, inSameDayAs: promptDate) else { continue }
+            let question = deepByMonth[month - 1][ordinal - 1]
+            return DailyPrompt(
+                id: "newsletter-\(year)-\(month)-\(ordinal)",
+                question: question,
+                kind: .featured,
+                isNewsletterFeature: true
+            )
+        }
+        return nil
+    }
+
+    private static func monthlyPhotoPrompt(for date: Date, calendar: Calendar) -> DailyPrompt? {
+        let year = calendar.component(.year, from: date)
+        let month = calendar.component(.month, from: date)
+        let prompts = [
+            (1, "Share a photo from this month that includes you."),
+            (3, "Share a photo of the best food you had this month.")
+        ]
+
+        for (ordinal, question) in prompts {
+            var components = DateComponents()
+            components.calendar = calendar
+            components.timeZone = calendar.timeZone
+            components.year = year
+            components.month = month
+            components.weekday = 1
+            components.weekdayOrdinal = ordinal
+            guard let promptDate = calendar.date(from: components),
+                  calendar.isDate(date, inSameDayAs: promptDate) else { continue }
+            return DailyPrompt(
+                id: "hidden-report-photo-\(year)-\(month)-\(ordinal)",
+                question: question,
+                kind: .featured,
+                isNewsletterFeature: true
+            )
+        }
+        return nil
+    }
+
     static func weeklyTrivia(for date: Date = .now) -> DailyPrompt {
-        let calendar = Calendar.current
+        weeklyTriviaForEffectiveDate(contentDate(for: date))
+    }
+
+    private static func weeklyTriviaForEffectiveDate(_ date: Date) -> DailyPrompt {
+        let calendar = pacificCalendar
         let year = calendar.component(.year, from: date)
         let month = calendar.component(.month, from: date)
         let thursdayNumber = min(4, (calendar.component(.day, from: date) - 1) / 7 + 1)
