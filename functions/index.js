@@ -152,10 +152,19 @@ exports.generateMonthlyNewsletters = onSchedule(
         const totals = {};
         const counts = {};
         const entries = [];
+        let photoCount = 0;
+        let mostLiked = null;
+        let mostCommented = null;
         for (const document of monthPosts) {
           const post = document.data();
           totals[post.authorName] = (totals[post.authorName] ?? 0) + (post.pointsAwarded ?? 0);
           counts[post.authorName] = (counts[post.authorName] ?? 0) + 1;
+          if (post.imageURL) photoCount += 1;
+          const summary = {postID: document.id, authorName: post.authorName, prompt: post.prompt ?? "", answer: post.answer ?? "", value: 0};
+          const likes = Array.isArray(post.likeIDs) ? post.likeIDs.length : 0;
+          const comments = post.commentCount ?? 0;
+          if (!mostLiked || likes > mostLiked.value) mostLiked = {...summary, value: likes};
+          if (!mostCommented || comments > mostCommented.value) mostCommented = {...summary, value: comments};
           if (post.isMonthlyReportPrompt === true || post.imageURL) {
             entries.push({
               postID: document.id,
@@ -208,6 +217,15 @@ exports.generateMonthlyNewsletters = onSchedule(
               winners: {
                 mostAnswers: mostAnswers ? {name: mostAnswers[0], value: mostAnswers[1]} : null,
                 mostPoints: mostPoints ? {name: mostPoints[0], value: mostPoints[1]} : null,
+              },
+              stats: {
+                answerCount: monthPosts.length,
+                questionCount: new Set(monthPosts.map((document) => document.data().promptID)).size,
+                photoCount,
+                participatingMemberCount: Object.keys(counts).length,
+                groupMemberCount: (group.memberIDs ?? []).length,
+                mostLiked,
+                mostCommented,
               },
             });
       }

@@ -101,6 +101,26 @@ struct NewsletterEdition: Identifiable, Hashable {
     let entries: [NewsletterEntry]
     let mostAnswersWinner: String?
     let mostPointsWinner: String?
+    var stats: MonthlyWrappedStats = .empty
+}
+
+struct MonthlyWrappedStats: Hashable {
+    var answerCount = 0
+    var questionCount = 0
+    var photoCount = 0
+    var participatingMemberCount = 0
+    var groupMemberCount = 0
+    var mostLiked: WrappedHighlight?
+    var mostCommented: WrappedHighlight?
+    static let empty = MonthlyWrappedStats()
+}
+
+struct WrappedHighlight: Hashable {
+    let postID: String
+    let authorName: String
+    let prompt: String
+    let answer: String
+    let value: Int
 }
 
 @MainActor
@@ -1202,6 +1222,11 @@ final class BlurbStore: ObservableObject {
         let winners = data["winners"] as? [String: Any]
         let mostAnswers = winners?["mostAnswers"] as? [String: Any]
         let mostPoints = winners?["mostPoints"] as? [String: Any]
+        let stats = data["stats"] as? [String: Any] ?? [:]
+        func highlight(_ key: String) -> WrappedHighlight? {
+            guard let value = stats[key] as? [String: Any], let postID = value["postID"] as? String else { return nil }
+            return WrappedHighlight(postID: postID, authorName: value["authorName"] as? String ?? "Blurb friend", prompt: value["prompt"] as? String ?? "", answer: value["answer"] as? String ?? "", value: value["value"] as? Int ?? 0)
+        }
         return NewsletterEdition(
             id: document.documentID,
             groupID: groupID,
@@ -1210,7 +1235,15 @@ final class BlurbStore: ObservableObject {
             monthLabel: monthLabel,
             entries: entries,
             mostAnswersWinner: mostAnswers?["name"] as? String,
-            mostPointsWinner: mostPoints?["name"] as? String
+            mostPointsWinner: mostPoints?["name"] as? String,
+            stats: MonthlyWrappedStats(
+                answerCount: stats["answerCount"] as? Int ?? entries.count,
+                questionCount: stats["questionCount"] as? Int ?? 0,
+                photoCount: stats["photoCount"] as? Int ?? entries.filter { $0.imageURL != nil }.count,
+                participatingMemberCount: stats["participatingMemberCount"] as? Int ?? 0,
+                groupMemberCount: stats["groupMemberCount"] as? Int ?? 0,
+                mostLiked: highlight("mostLiked"), mostCommented: highlight("mostCommented")
+            )
         )
     }
 
