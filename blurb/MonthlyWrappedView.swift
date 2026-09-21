@@ -35,24 +35,28 @@ struct MonthlyWrappedView: View {
     }
 
     var body: some View {
-        ZStack {
-            paper.ignoresSafeArea()
-            slide(slides[min(page, slides.count - 1)])
-                .id(page)
-                .transition(.opacity.combined(with: .scale(scale: 0.98)))
-                .padding(24)
-            HStack(spacing: 5) {
-                ForEach(slides.indices, id: \.self) { index in
-                    Capsule().fill(index <= page ? .black : .black.opacity(0.18)).frame(height: 4)
+        GeometryReader { geometry in
+            ZStack {
+                paper.ignoresSafeArea()
+                slide(slides[min(page, slides.count - 1)])
+                    .id(page)
+                    .transition(.opacity.combined(with: .scale(scale: 0.98)))
+                    .padding(24)
+                HStack(spacing: 5) {
+                    ForEach(slides.indices, id: \.self) { index in
+                        Capsule().fill(index <= page ? .black : .black.opacity(0.18)).frame(height: 4)
+                    }
                 }
+                .padding(.horizontal, 16)
+                .frame(maxHeight: .infinity, alignment: .top)
+                .padding(.top, 8)
             }
-            .padding(.horizontal, 16)
-            .frame(maxHeight: .infinity, alignment: .top)
-            .padding(.top, 8)
-            HStack(spacing: 0) {
-                Color.clear.contentShape(Rectangle()).onTapGesture { move(-1) }
-                Color.clear.contentShape(Rectangle()).onTapGesture { move(1) }
-            }
+            .contentShape(Rectangle())
+            .simultaneousGesture(
+                SpatialTapGesture().onEnded { value in
+                    move(value.location.x < geometry.size.width / 2 ? -1 : 1)
+                }
+            )
         }
         .foregroundStyle(.black)
         .navigationTitle(edition.monthLabel)
