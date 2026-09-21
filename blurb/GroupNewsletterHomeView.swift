@@ -229,7 +229,7 @@ private struct GroupNewsletterArchiveView: View {
             } else {
                 ForEach(editions) { edition in
                     NavigationLink {
-                        ArchivedNewsletterView(edition: edition)
+                        MonthlyWrappedView(edition: edition)
                     } label: {
                         Label(edition.monthLabel, systemImage: "newspaper.fill")
                     }
