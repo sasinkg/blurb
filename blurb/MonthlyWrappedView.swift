@@ -16,7 +16,7 @@ struct MonthlyWrappedView: View {
         if let winner = edition.mostPointsWinner { result.append(.winner("Most points won", winner, "star.fill")) }
         if let item = stats.mostLiked, item.value > 0 { result.append(.highlight("Most liked", item, "heart.fill")) }
         if let item = stats.mostCommented, item.value > 0 { result.append(.highlight("Most discussed", item, "bubble.left.and.bubble.right.fill")) }
-        let answers = edition.entries.filter { !$0.answer.isEmpty }
+        let answers = edition.entries.filter { $0.imageURL == nil && !$0.answer.isEmpty }
         let questions = Dictionary(grouping: answers, by: \.promptID).values
             .compactMap { responses -> (NewsletterEntry, [NewsletterEntry])? in
                 guard let first = responses.min(by: { $0.createdAt < $1.createdAt }) else { return nil }
@@ -24,7 +24,12 @@ struct MonthlyWrappedView: View {
             }
             .sorted { $0.0.createdAt < $1.0.createdAt }
         result.append(contentsOf: questions.map { .question($0.0.prompt, $0.1) })
-        for photo in edition.entries.filter({ $0.imageURL != nil }) { result.append(.photo(photo)) }
+        let photoGroups = Dictionary(grouping: edition.entries.filter { $0.imageURL != nil }, by: \.promptID)
+            .values.sorted { ($0.first?.createdAt ?? .now) < ($1.first?.createdAt ?? .now) }
+        result.append(contentsOf: photoGroups.compactMap { entries in
+            guard let title = entries.first?.prompt else { return nil }
+            return .photoGroup(title, entries.sorted { $0.authorName < $1.authorName })
+        })
         result.append(.final)
         return result
     }
@@ -125,21 +130,36 @@ struct MonthlyWrappedView: View {
                         }
                     }
                 }
-            case let .photo(entry):
-                if entry.imageURL?.hasPrefix("demo://") == true {
-                    Rectangle().fill(Color.black.opacity(0.06)).aspectRatio(4.0 / 5.0, contentMode: .fit)
-                        .overlay { Image(systemName: entry.imageURL?.contains("food") == true ? "fork.knife" : "person.crop.rectangle.fill").font(.system(size: 64)) }
-                        .overlay { Rectangle().stroke(.black, lineWidth: 3) }
-                } else {
-                    AsyncImage(url: URL(string: entry.imageURL ?? "")) { $0.resizable().scaledToFit() } placeholder: { ProgressView() }
-                        .overlay { Rectangle().stroke(.black, lineWidth: 3) }
+            case let .photoGroup(title, entries):
+                sectionLabel("PHOTO DESK")
+                Text(title).font(.system(size: 28, weight: .black, design: .serif)).multilineTextAlignment(.center)
+                ScrollView {
+                    LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 14) {
+                        ForEach(entries) { entry in
+                            VStack(alignment: .leading, spacing: 6) {
+                                if entry.imageURL?.hasPrefix("demo://") == true {
+                                    Rectangle().fill(Color.black.opacity(0.06)).aspectRatio(4.0 / 5.0, contentMode: .fit)
+                                        .overlay { Image(systemName: entry.imageURL?.contains("food") == true ? "fork.knife" : "person.crop.rectangle.fill").font(.system(size: 40)) }
+                                        .overlay { Rectangle().stroke(.black, lineWidth: 2) }
+                                } else {
+                                    AsyncImage(url: URL(string: entry.imageURL ?? "")) { $0.resizable().scaledToFill() } placeholder: { Rectangle().fill(.quaternary) }
+                                        .aspectRatio(4.0 / 5.0, contentMode: .fit).clipped().overlay { Rectangle().stroke(.black, lineWidth: 2) }
+                                }
+                                if !entry.answer.isEmpty { Text(entry.answer).font(.system(.caption, design: .serif).bold()) }
+                                Text(entry.authorName.uppercased()).font(.system(size: 8, weight: .black)).tracking(0.8)
+                            }
+                        }
+                    }
                 }
-                Text(entry.prompt).font(.title2.bold()).multilineTextAlignment(.center)
-                Text(entry.authorName.uppercased()).font(.caption.bold()).tracking(1)
             case .final:
-                Text("FINAL EDITION").font(.caption.weight(.black)).tracking(2).padding(8).background(accent)
-                Text("That was \(edition.monthLabel)").font(.system(size: 42, weight: .black, design: .serif)).multilineTextAlignment(.center)
-                Text("A month looks different through everyone’s eyes.").font(.title3).italic().multilineTextAlignment(.center)
+                sectionLabel("FINAL EDITION")
+                Text("THE \(edition.groupName.uppercased()) TIMES").font(.system(size: 34, weight: .black, design: .serif)).multilineTextAlignment(.center)
+                Rectangle().frame(height: 5)
+                Text("A MONTH TO REMEMBER").font(.system(size: 40, weight: .black, design: .serif)).multilineTextAlignment(.center)
+                Text("\(edition.stats.answerCount) answers across \(edition.stats.questionCount) questions tell the story of \(edition.monthLabel).").font(.system(.title3, design: .serif)).multilineTextAlignment(.center)
+                HStack { stat(edition.stats.participatingMemberCount, "people"); stat(edition.stats.photoCount, "photos") }
+                if let winner = edition.mostPointsWinner { Text("POINTS LEADER: \(winner.uppercased())").font(.caption.weight(.black)).tracking(1).padding(10).overlay { Rectangle().stroke(.black) } }
+                Text("A month looks different through everyone’s eyes.").font(.system(.body, design: .serif)).italic().multilineTextAlignment(.center)
             }
             Spacer()
             Rectangle().frame(height: 1)
@@ -196,7 +216,7 @@ private struct WrappedShareImage: Transferable {
 }
 
 private enum WrappedSlide {
-    case intro, stats, winner(String, String, String), highlight(String, WrappedHighlight, String), question(String, [NewsletterEntry]), photo(NewsletterEntry), final
+    case intro, stats, winner(String, String, String), highlight(String, WrappedHighlight, String), question(String, [NewsletterEntry]), photoGroup(String, [NewsletterEntry]), final
 }
 
 enum MonthlyWrappedDemo {
@@ -217,8 +237,8 @@ enum MonthlyWrappedDemo {
         let selfCaptions = ["Golden hour with the group", "A Saturday by the water", "Finally made it to the concert", "The quiet morning I needed"]
         let foodCaptions = ["The pasta worth waiting for", "Perfect late-night tacos", "Breakfast that became lunch", "Homemade dumplings at last"]
         for (index, person) in people.enumerated() {
-            entries.append(NewsletterEntry(id: "demo-photo-self-\(index)", authorName: person, answer: "", prompt: selfCaptions[index], promptID: "demo-photo", imageURL: "demo://self/\(index)", createdAt: .now))
-            entries.append(NewsletterEntry(id: "demo-photo-food-\(index)", authorName: person, answer: "", prompt: foodCaptions[index], promptID: "demo-photo", imageURL: "demo://food/\(index)", createdAt: .now))
+            entries.append(NewsletterEntry(id: "demo-photo-self-\(index)", authorName: person, answer: selfCaptions[index], prompt: "In the frame this month", promptID: "demo-photo-self", imageURL: "demo://self/\(index)", createdAt: .now))
+            entries.append(NewsletterEntry(id: "demo-photo-food-\(index)", authorName: person, answer: foodCaptions[index], prompt: "Best food this month", promptID: "demo-photo-food", imageURL: "demo://food/\(index)", createdAt: .now))
         }
         return NewsletterEdition(
             id: "demo-wrapped", groupID: "demo", groupName: groupName,
