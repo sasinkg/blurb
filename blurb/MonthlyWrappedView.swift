@@ -150,3 +150,24 @@ private struct WrappedShareImage: Transferable {
 private enum WrappedSlide {
     case intro, stats, highlight(String, WrappedHighlight, String), answer(NewsletterEntry), photo(NewsletterEntry), final
 }
+
+enum MonthlyWrappedDemo {
+    static func edition(groupName: String, displayName: String) -> NewsletterEdition {
+        let name = displayName.split(separator: " ").first.map(String.init) ?? "You"
+        let entries = [
+            NewsletterEntry(id: "demo-1", authorName: name, answer: "The night we made dinner without a recipe and somehow stayed at the table for three hours.", prompt: "What moment do you want to remember?", promptID: "demo-memory", imageURL: nil, createdAt: .now.addingTimeInterval(-86400 * 12)),
+            NewsletterEntry(id: "demo-2", authorName: "Maya", answer: "Everyone showing up when I needed them, without making me ask twice.", prompt: "What made you feel cared for this month?", promptID: "demo-care", imageURL: nil, createdAt: .now.addingTimeInterval(-86400 * 6))
+        ]
+        return NewsletterEdition(
+            id: "demo-wrapped", groupID: "demo", groupName: groupName,
+            monthKey: "2026-08", monthLabel: "August 2026", entries: entries,
+            mostAnswersWinner: "Maya", mostPointsWinner: name,
+            stats: MonthlyWrappedStats(
+                answerCount: 74, questionCount: 24, photoCount: 12,
+                participatingMemberCount: 4, groupMemberCount: 4,
+                mostLiked: WrappedHighlight(postID: "demo-1", authorName: name, prompt: entries[0].prompt, answer: entries[0].answer, value: 18),
+                mostCommented: WrappedHighlight(postID: "demo-2", authorName: "Maya", prompt: entries[1].prompt, answer: entries[1].answer, value: 11)
+            )
+        )
+    }
+}

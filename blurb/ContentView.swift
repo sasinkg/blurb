@@ -2263,6 +2263,15 @@ struct SettingsView: View {
                                 Label("Open demo newsletter", systemImage: "newspaper.fill")
                                     .font(.subheadline.bold())
                             }
+                            NavigationLink {
+                                MonthlyWrappedView(edition: MonthlyWrappedDemo.edition(
+                                    groupName: blurbStore.selectedGroup?.name ?? "Roomies",
+                                    displayName: blurbStore.profile.displayName
+                                ))
+                            } label: {
+                                Label("Open demo Monthly Wrapped", systemImage: "sparkles.rectangle.stack.fill")
+                                    .font(.subheadline.bold())
+                            }
                         }
 
                         settingsCard(title: "PRIVACY") {
