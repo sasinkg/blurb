@@ -93,6 +93,19 @@ struct GroupNewsletterHomeView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 8))
 
+                    NavigationLink {
+                        PhotoOfMonthPickerView(group: group)
+                    } label: {
+                        newsletterCard(
+                            title: "Photo of the Month",
+                            subtitle: blurbStore.photoOfMonthSelection(in: group.id) == nil
+                                ? "Choose one of your photos privately"
+                                : "Selected — you can change it until month end",
+                            icon: blurbStore.photoOfMonthSelection(in: group.id) == nil ? "photo.badge.plus" : "checkmark.circle.fill"
+                        )
+                    }
+                    .buttonStyle(.plain)
+
                     newsletterCard(
                         title: currentEdition.monthLabel,
                         subtitle: "Locked until the finished edition is generated",
@@ -148,6 +161,56 @@ struct GroupNewsletterHomeView: View {
         .padding(16)
         .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 8))
         .overlay { RoundedRectangle(cornerRadius: 8).stroke(.primary.opacity(0.45), lineWidth: 1.5) }
+    }
+}
+
+private struct PhotoOfMonthPickerView: View {
+    @EnvironmentObject private var blurbStore: BlurbStore
+    @Environment(\.dismiss) private var dismiss
+    let group: BlurbGroup
+    @State private var savingPostID: String?
+
+    private var posts: [BlurbPost] { blurbStore.photoPostsForCurrentMonth(in: group.id) }
+    private var selection: PhotoOfMonthSelection? { blurbStore.photoOfMonthSelection(in: group.id) }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Pick one photo you posted this month. Your choice stays private until the monthly recap, and you can change it until the month ends.")
+                    .foregroundStyle(.secondary)
+                if posts.isEmpty {
+                    ContentUnavailableView("No photos yet", systemImage: "photo", description: Text("Post a photo in this group, then return here to select it."))
+                } else {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 145), spacing: 12)], spacing: 12) {
+                        ForEach(posts) { post in
+                            Button {
+                                savingPostID = post.id
+                                Task {
+                                    if await blurbStore.selectPhotoOfMonth(post) { dismiss() }
+                                    savingPostID = nil
+                                }
+                            } label: {
+                                ZStack(alignment: .topTrailing) {
+                                    AsyncImage(url: URL(string: post.imageURL ?? "")) { image in
+                                        image.resizable().scaledToFill()
+                                    } placeholder: { Rectangle().fill(.quaternary) }
+                                    .frame(height: 180).clipShape(RoundedRectangle(cornerRadius: 12))
+                                    if selection?.postID == post.id {
+                                        Image(systemName: "checkmark.circle.fill").font(.title).foregroundStyle(.white, .green).padding(8)
+                                    }
+                                    if savingPostID == post.id { ProgressView().padding(10) }
+                                }
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(savingPostID != nil)
+                            .accessibilityLabel(selection?.postID == post.id ? "Selected photo" : "Select photo")
+                        }
+                    }
+                }
+            }.padding()
+        }
+        .navigationTitle("Photo of the Month")
+        .navigationBarTitleDisplayMode(.inline)
     }
 }
 

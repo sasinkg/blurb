@@ -12,6 +12,7 @@
 		A1B10000000000000000000003 /* FirebaseFirestore in Frameworks */ = {isa = PBXBuildFile; productRef = A1B10000000000000000000013 /* FirebaseFirestore */; };
 		A1B10000000000000000000004 /* FirebaseStorage in Frameworks */ = {isa = PBXBuildFile; productRef = A1B10000000000000000000014 /* FirebaseStorage */; };
 		A1B10000000000000000000005 /* FirebaseMessaging in Frameworks */ = {isa = PBXBuildFile; productRef = A1B10000000000000000000015 /* FirebaseMessaging */; };
+		A1B10000000000000000000006 /* FirebaseFunctions in Frameworks */ = {isa = PBXBuildFile; productRef = A1B10000000000000000000016 /* FirebaseFunctions */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -65,6 +66,7 @@
 				A1B10000000000000000000003 /* FirebaseFirestore in Frameworks */,
 				A1B10000000000000000000004 /* FirebaseStorage in Frameworks */,
 				A1B10000000000000000000005 /* FirebaseMessaging in Frameworks */,
+				A1B10000000000000000000006 /* FirebaseFunctions in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -130,6 +132,7 @@
 				A1B10000000000000000000013 /* FirebaseFirestore */,
 				A1B10000000000000000000014 /* FirebaseStorage */,
 				A1B10000000000000000000015 /* FirebaseMessaging */,
+				A1B10000000000000000000016 /* FirebaseFunctions */,
 			);
 			productName = blurb;
 			productReference = 8E52B778303F73E200079CF4 /* blurb.app */;
@@ -668,6 +671,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = A1B10000000000000000000021 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
 			productName = FirebaseMessaging;
+		};
+		A1B10000000000000000000016 /* FirebaseFunctions */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A1B10000000000000000000021 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
+			productName = FirebaseFunctions;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

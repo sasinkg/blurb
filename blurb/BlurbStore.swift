@@ -1,5 +1,6 @@
 import FirebaseAuth
 import FirebaseFirestore
+import FirebaseFunctions
 import FirebaseStorage
 import Foundation
 
@@ -114,6 +115,7 @@ final class BlurbStore: ObservableObject {
     @Published private(set) var needsProfileSetup = false
     @Published private(set) var commentsByPostID: [String: [BlurbComment]] = [:]
     @Published private(set) var newsletterEditions: [NewsletterEdition] = []
+    @Published private(set) var photoOfMonthSelections: [String: PhotoOfMonthSelection] = [:]
     @Published var selectedGroupID: String?
     @Published var errorMessage: String?
     @Published private(set) var listenerErrorMessage: String?
@@ -123,6 +125,7 @@ final class BlurbStore: ObservableObject {
     private var postsListener: ListenerRegistration?
     private var profileListener: ListenerRegistration?
     private var newsletterListener: ListenerRegistration?
+    private var photoOfMonthListener: ListenerRegistration?
     private var answerCountListeners: [String: ListenerRegistration] = [:]
     private var commentListeners: [String: ListenerRegistration] = [:]
     private var currentUserID: String?
@@ -172,6 +175,38 @@ final class BlurbStore: ObservableObject {
         return posts.first {
             !$0.isSample && $0.authorID == userID && $0.promptID == promptID && $0.groupID == targetGroupID
         }
+    }
+
+    func photoPostsForCurrentMonth(in groupID: String) -> [BlurbPost] {
+        guard let userID = currentUserID else { return [] }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "America/Los_Angeles")!
+        return posts.filter {
+            !$0.isSample && $0.groupID == groupID && $0.authorID == userID
+                && $0.imageURL != nil && calendar.isDate($0.createdAt, equalTo: .now, toGranularity: .month)
+        }.sorted { $0.createdAt > $1.createdAt }
+    }
+
+    func photoOfMonthSelection(in groupID: String) -> PhotoOfMonthSelection? {
+        photoOfMonthSelections[Self.photoSelectionID(groupID: groupID)]
+    }
+
+    func selectPhotoOfMonth(_ post: BlurbPost) async -> Bool {
+        do {
+            _ = try await Functions.functions().httpsCallable("setPhotoOfMonthSelection")
+                .call(["groupID": post.groupID, "postID": post.id])
+            return true
+        } catch {
+            errorMessage = error.localizedDescription
+            return false
+        }
+    }
+
+    private static func photoSelectionID(groupID: String, date: Date = .now) -> String {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "America/Los_Angeles")!
+        let parts = calendar.dateComponents([.year, .month], from: date)
+        return String(format: "%@_%04d-%02d", groupID, parts.year ?? 0, parts.month ?? 0)
     }
 
     func existingAnswer(promptID: String, in groupID: String) async -> BlurbPost? {
@@ -293,6 +328,15 @@ final class BlurbStore: ObservableObject {
                     self.newsletterEditions = editions.sorted { $0.monthKey > $1.monthKey }
                 }
             }
+
+        photoOfMonthListener = database.collection("users").document(userID)
+            .collection("photoOfMonthSelections")
+            .addSnapshotListener { [weak self] snapshot, _ in
+                let selections = snapshot?.documents.compactMap(Self.makePhotoOfMonthSelection) ?? []
+                Task { @MainActor in
+                    self?.photoOfMonthSelections = Dictionary(uniqueKeysWithValues: selections.map { ($0.id, $0) })
+                }
+            }
     }
 
     func invalidateListeners() {
@@ -302,6 +346,7 @@ final class BlurbStore: ObservableObject {
         postsListener?.remove(); postsListener = nil
         profileListener?.remove(); profileListener = nil
         newsletterListener?.remove(); newsletterListener = nil
+        photoOfMonthListener?.remove(); photoOfMonthListener = nil
         answerCountListeners.values.forEach { $0.remove() }
         answerCountListeners = [:]
         commentListeners.values.forEach { $0.remove() }
@@ -317,7 +362,7 @@ final class BlurbStore: ObservableObject {
         profile = BlurbProfile()
         profileLoaded = false
         needsProfileSetup = false
-        groups = []; groupsLoaded = false; posts = []; answerCountsByGroup = [:]; myAnswerStatusByGroup = [:]; commentsByPostID = [:]; newsletterEditions = []; selectedGroupID = nil
+        groups = []; groupsLoaded = false; posts = []; answerCountsByGroup = [:]; myAnswerStatusByGroup = [:]; commentsByPostID = [:]; newsletterEditions = []; photoOfMonthSelections = [:]; selectedGroupID = nil
         errorMessage = nil
         listenerErrors = [:]
         listenerErrorMessage = nil
@@ -1115,6 +1160,22 @@ final class BlurbStore: ObservableObject {
             text: text,
             createdAt: (data["createdAt"] as? Timestamp)?.dateValue() ?? .now,
             likeIDs: data["likeIDs"] as? [String] ?? []
+        )
+    }
+
+    private static func makePhotoOfMonthSelection(_ document: QueryDocumentSnapshot) -> PhotoOfMonthSelection? {
+        let data = document.data()
+        guard let groupID = data["groupID"] as? String,
+              let monthKey = data["monthKey"] as? String,
+              let userID = data["userID"] as? String,
+              let postID = data["postID"] as? String,
+              let imageURL = data["imageURL"] as? String else { return nil }
+        return PhotoOfMonthSelection(
+            id: document.documentID, groupID: groupID, monthKey: monthKey, userID: userID,
+            postID: postID, imageURL: imageURL, authorName: data["authorName"] as? String ?? "Blurb friend",
+            postCreatedAt: (data["postCreatedAt"] as? Timestamp)?.dateValue() ?? .now,
+            createdAt: (data["createdAt"] as? Timestamp)?.dateValue() ?? .now,
+            updatedAt: (data["updatedAt"] as? Timestamp)?.dateValue() ?? .now
         )
     }
 

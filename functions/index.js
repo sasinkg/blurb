@@ -173,6 +173,26 @@ exports.generateMonthlyNewsletters = onSchedule(
           }
         }
 
+        for (const userID of group.memberIDs ?? []) {
+          const selectionID = selectionDocumentID(groupDocument.id, monthKey);
+          const selection = (await database.doc(`users/${userID}/photoOfMonthSelections/${selectionID}`).get()).data();
+          if (selection?.imageURL) {
+            entries.push({
+              postID: selection.postID,
+              authorID: userID,
+              authorName: selection.authorName ?? "Blurb friend",
+              answer: "",
+              prompt: "Photo of the Month",
+              promptID: `photo-of-month-${monthKey}`,
+              imageURL: selection.imageURL,
+              pollOptions: [],
+              createdAt: selection.postCreatedAt,
+              pointsAwarded: 0,
+              isPhotoOfMonth: true,
+            });
+          }
+        }
+
         const mostAnswers = Object.entries(counts).sort((a, b) => b[1] - a[1])[0] ?? null;
         const mostPoints = Object.entries(totals).sort((a, b) => b[1] - a[1])[0] ?? null;
         await database.collection("newsletterEditions")
@@ -190,6 +210,37 @@ exports.generateMonthlyNewsletters = onSchedule(
                 mostPoints: mostPoints ? {name: mostPoints[0], value: mostPoints[1]} : null,
               },
             });
+      }
+    },
+);
+
+exports.remindPhotoOfMonth = onSchedule(
+    {schedule: "0 18 28 * *", timeZone: "America/Los_Angeles"},
+    async () => {
+      const database = getFirestore();
+      const monthKey = photoMonthKey(new Date());
+      const groups = await database.collection("groups").get();
+      for (const groupDocument of groups.docs) {
+        const group = groupDocument.data();
+        for (const userID of group.memberIDs ?? []) {
+          const selectionID = selectionDocumentID(groupDocument.id, monthKey);
+          if ((await database.doc(`users/${userID}/photoOfMonthSelections/${selectionID}`).get()).exists) continue;
+          const receipt = database.doc(`notificationDeliveries/photo-month-${groupDocument.id}-${userID}-${monthKey}`);
+          const claimed = await database.runTransaction(async (transaction) => {
+            if ((await transaction.get(receipt)).exists) return false;
+            transaction.create(receipt, {createdAt: FieldValue.serverTimestamp()});
+            return true;
+          });
+          if (!claimed) continue;
+          const user = (await database.doc(`users/${userID}`).get()).data();
+          const tokens = [...new Set(user?.fcmTokens ?? [])].filter(Boolean);
+          if (tokens.length) await getMessaging().sendEachForMulticast({
+            tokens,
+            notification: {title: "Choose your Photo of the Month", body: `Pick one photo for ${group.name ?? "your group"} before the month ends.`},
+            data: {type: "photoOfMonth", groupID: groupDocument.id},
+            apns: {payload: {aps: {sound: "default"}}},
+          });
+        }
       }
     },
 );
