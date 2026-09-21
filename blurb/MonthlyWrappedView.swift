@@ -95,7 +95,6 @@ struct MonthlyWrappedView: View {
                 }
                 Rectangle().frame(height: 3)
             }
-            Spacer()
             switch slide {
             case .intro:
                 Text("SPECIAL EDITION").font(.caption.weight(.black)).tracking(2).padding(8).background(accent)
@@ -142,8 +141,8 @@ struct MonthlyWrappedView: View {
                         ForEach(entries) { entry in
                             VStack(alignment: .leading, spacing: 6) {
                                 if entry.imageURL?.hasPrefix("demo://") == true {
-                                    Rectangle().fill(Color.black.opacity(0.06)).aspectRatio(4.0 / 5.0, contentMode: .fit)
-                                        .overlay { Image(systemName: entry.imageURL?.contains("food") == true ? "fork.knife" : "person.crop.rectangle.fill").font(.system(size: 40)) }
+                                    DemoWrappedPhoto(url: entry.imageURL ?? "")
+                                        .aspectRatio(4.0 / 5.0, contentMode: .fill).clipped()
                                         .overlay { Rectangle().stroke(.black, lineWidth: 2) }
                                 } else {
                                     AsyncImage(url: URL(string: entry.imageURL ?? "")) { $0.resizable().scaledToFill() } placeholder: { Rectangle().fill(.quaternary) }
@@ -158,7 +157,6 @@ struct MonthlyWrappedView: View {
             case .final:
                 WrappedNewspaperPage(edition: edition, accent: accent)
             }
-            Spacer()
             Rectangle().frame(height: 1)
             Text("TAP LEFT OR RIGHT TO NAVIGATE").font(.system(size: 9, weight: .black)).tracking(1).foregroundStyle(.secondary)
         }
@@ -171,6 +169,28 @@ struct MonthlyWrappedView: View {
     private func stat(_ value: Int, _ label: String) -> some View {
         VStack { Text("\(value)").font(.system(size: 48, weight: .black)); Text(label.uppercased()).font(.caption.bold()) }
             .frame(maxWidth: .infinity).padding().background(Color.white.opacity(0.38)).overlay { Rectangle().stroke(.black, lineWidth: 1.5) }
+    }
+}
+
+private struct DemoWrappedPhoto: View {
+    let url: String
+    var body: some View {
+        if let image = croppedImage {
+            Image(uiImage: image).resizable().scaledToFill()
+        } else {
+            Rectangle().fill(Color.black.opacity(0.06))
+        }
+    }
+    private var croppedImage: UIImage? {
+        guard let source = UIImage(named: "DemoWrappedContactSheet")?.cgImage,
+              let rawIndex = Int(url.split(separator: "/").last ?? "0") else { return nil }
+        let index = url.contains("food") ? rawIndex + 4 : rawIndex
+        let column = index % 4
+        let row = index / 4
+        let cellWidth = source.width / 4
+        let cellHeight = source.height / 2
+        guard let crop = source.cropping(to: CGRect(x: column * cellWidth, y: row * cellHeight, width: cellWidth, height: cellHeight)) else { return nil }
+        return UIImage(cgImage: crop)
     }
 }
 
@@ -191,6 +211,13 @@ private struct WrappedNewspaperPage: View {
                 Text("FINAL EDITION").font(.caption.weight(.black)).tracking(2).padding(7).background(accent)
                 Text("THE \(edition.groupName.uppercased()) TIMES").font(.system(size: 31, weight: .black, design: .serif)).frame(maxWidth: .infinity)
                 Rectangle().frame(height: 5)
+                if edition.id == "demo-wrapped" {
+                    Image("DemoWrappedContactSheet")
+                        .resizable().scaledToFit()
+                        .overlay { Rectangle().stroke(.black, lineWidth: 2) }
+                    Text("THE MONTH IN PICTURES — FRIENDS, FOOD, AND THE MOMENTS BETWEEN")
+                        .font(.system(size: 9, weight: .black)).tracking(0.8)
+                }
                 HStack {
                     newspaperStat(edition.stats.answerCount, "ANSWERS")
                     newspaperStat(edition.stats.questionCount, "QUESTIONS")
@@ -203,17 +230,19 @@ private struct WrappedNewspaperPage: View {
                         if let winner = edition.mostPointsWinner { Text("Points leader — **\(winner)**") }
                     }.font(.system(.caption, design: .serif)).padding(12).overlay { Rectangle().stroke(.black, lineWidth: 1.5) }
                 }
-                ForEach(Array(questions.enumerated()), id: \.offset) { index, question in
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("\(String(format: "%02d", index + 1)) · THE MONTH IN WORDS").font(.system(size: 9, weight: .black)).tracking(1).foregroundStyle(.secondary)
-                        Text(question.0).font(.system(size: 21, weight: .bold, design: .serif))
-                        ForEach(question.1) { entry in
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(entry.authorName.uppercased()).font(.system(size: 8, weight: .black)).tracking(0.8)
-                                Text(entry.answer).font(.system(.caption, design: .serif))
+                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], alignment: .leading, spacing: 14) {
+                    ForEach(Array(questions.enumerated()), id: \.offset) { index, question in
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("\(String(format: "%02d", index + 1)) · THE MONTH IN WORDS").font(.system(size: 7, weight: .black)).tracking(0.7).foregroundStyle(.secondary)
+                            Text(question.0).font(.system(size: 16, weight: .bold, design: .serif))
+                            ForEach(question.1) { entry in
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(entry.authorName.uppercased()).font(.system(size: 6, weight: .black)).tracking(0.5)
+                                    Text(entry.answer).font(.system(size: 9, design: .serif)).lineLimit(5)
+                                }
                             }
-                        }
-                    }.padding(.bottom, 14).overlay(alignment: .bottom) { Rectangle().frame(height: 1) }
+                        }.padding(.trailing, 8).overlay(alignment: .trailing) { Rectangle().frame(width: 1) }
+                    }
                 }
                 ForEach(Array(photoGroups.enumerated()), id: \.offset) { _, group in
                     VStack(alignment: .leading, spacing: 10) {
@@ -222,8 +251,8 @@ private struct WrappedNewspaperPage: View {
                             ForEach(group.1) { entry in
                                 VStack(alignment: .leading, spacing: 4) {
                                     if entry.imageURL?.hasPrefix("demo://") == true {
-                                        Rectangle().fill(.black.opacity(0.06)).aspectRatio(4.0 / 3.0, contentMode: .fit)
-                                            .overlay { Image(systemName: entry.imageURL?.contains("food") == true ? "fork.knife" : "person.crop.rectangle.fill") }
+                                        DemoWrappedPhoto(url: entry.imageURL ?? "")
+                                            .aspectRatio(4.0 / 3.0, contentMode: .fill).clipped()
                                     } else {
                                         AsyncImage(url: URL(string: entry.imageURL ?? "")) { $0.resizable().scaledToFill() } placeholder: { Rectangle().fill(.quaternary) }
                                             .aspectRatio(4.0 / 3.0, contentMode: .fit).clipped()
