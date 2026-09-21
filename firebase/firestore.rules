@@ -22,6 +22,14 @@ service cloud.firestore {
 
     match /users/{userID} {
       allow read, create, update, delete: if signedIn() && request.auth.uid == userID;
+
+      match /photoOfMonthSelections/{selectionID} {
+        // Selections remain private until a trusted monthly recap copies them
+        // into a published edition. All mutations go through the callable
+        // function so membership, ownership, month, and lock rules are enforced.
+        allow read: if signedIn() && request.auth.uid == userID;
+        allow write: if false;
+      }
     }
 
     match /groups/{groupID} {

@@ -1,5 +1,6 @@
 const {onDocumentCreated, onDocumentWritten} = require("firebase-functions/v2/firestore");
 const {onSchedule} = require("firebase-functions/v2/scheduler");
+const {onCall, HttpsError} = require("firebase-functions/v2/https");
 const {initializeApp} = require("firebase-admin/app");
 const {getFirestore, FieldValue} = require("firebase-admin/firestore");
 const {getMessaging} = require("firebase-admin/messaging");
@@ -7,6 +8,61 @@ const {getMessaging} = require("firebase-admin/messaging");
 initializeApp();
 
 const {notificationRecipients} = require("./mentions");
+const {
+  buildSelection,
+  photoMonthKey,
+  selectionDocumentID,
+  validateSelectionInput,
+} = require("./photoOfMonth");
+
+exports.setPhotoOfMonthSelection = onCall(async (request) => {
+  if (!request.auth?.uid) throw new HttpsError("unauthenticated", "Sign in to choose a photo.");
+
+  let input;
+  try {
+    input = validateSelectionInput(request.data);
+  } catch (error) {
+    throw new HttpsError("invalid-argument", error.message);
+  }
+
+  const database = getFirestore();
+  const userID = request.auth.uid;
+  const groupSnapshot = await database.doc(`groups/${input.groupID}`).get();
+  const group = groupSnapshot.data();
+  if (!groupSnapshot.exists || !(group.memberIDs ?? []).includes(userID)) {
+    throw new HttpsError("permission-denied", "You are not a member of this group.");
+  }
+
+  const postSnapshot = await database.doc(`posts/${input.postID}`).get();
+  const post = postSnapshot.data();
+  if (!postSnapshot.exists || post.groupID !== input.groupID || post.authorID !== userID) {
+    throw new HttpsError("permission-denied", "Choose one of your own Blurbs from this group.");
+  }
+  if (typeof post.imageURL !== "string" || !post.imageURL) {
+    throw new HttpsError("failed-precondition", "The selected Blurb does not have a photo.");
+  }
+
+  const createdAt = post.createdAt?.toDate?.();
+  const monthKey = photoMonthKey(new Date());
+  if (!createdAt || photoMonthKey(createdAt) !== monthKey) {
+    throw new HttpsError("failed-precondition", "Choose a photo posted during the current month.");
+  }
+
+  const reference = database.doc(
+      `users/${userID}/photoOfMonthSelections/${selectionDocumentID(input.groupID, monthKey)}`,
+  );
+  await database.runTransaction(async (transaction) => {
+    const existing = await transaction.get(reference);
+    const selection = {
+      ...buildSelection({groupID: input.groupID, postID: input.postID, post, userID, monthKey}),
+      updatedAt: FieldValue.serverTimestamp(),
+    };
+    if (!existing.exists) selection.createdAt = FieldValue.serverTimestamp();
+    transaction.set(reference, selection, {merge: true});
+  });
+
+  return {monthKey, postID: input.postID};
+});
 
 async function notifyGroupActivity({eventID, postID, post, senderID, text, previousText = "", commentID}) {
   if (!post || post.isSample || !post.groupID || !senderID) return;
