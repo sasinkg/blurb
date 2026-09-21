@@ -165,21 +165,19 @@ exports.generateMonthlyNewsletters = onSchedule(
           const comments = post.commentCount ?? 0;
           if (!mostLiked || likes > mostLiked.value) mostLiked = {...summary, value: likes};
           if (!mostCommented || comments > mostCommented.value) mostCommented = {...summary, value: comments};
-          if (post.isMonthlyReportPrompt === true || post.imageURL) {
-            entries.push({
-              postID: document.id,
-              authorID: post.authorID,
-              authorName: post.authorName,
-              authorPhotoURL: post.authorPhotoURL ?? null,
-              answer: post.answer ?? "",
-              prompt: post.prompt ?? "",
-              promptID: post.promptID ?? "",
-              imageURL: post.imageURL ?? null,
-              pollOptions: post.pollOptions ?? [],
-              createdAt: post.createdAt,
-              pointsAwarded: post.pointsAwarded ?? 0,
-            });
-          }
+          entries.push({
+            postID: document.id,
+            authorID: post.authorID,
+            authorName: post.authorName,
+            authorPhotoURL: post.authorPhotoURL ?? null,
+            answer: post.answer ?? "",
+            prompt: post.prompt ?? "",
+            promptID: post.promptID ?? "",
+            imageURL: post.imageURL ?? null,
+            pollOptions: post.pollOptions ?? [],
+            createdAt: post.createdAt,
+            pointsAwarded: post.pointsAwarded ?? 0,
+          });
         }
 
         for (const userID of group.memberIDs ?? []) {
@@ -187,7 +185,8 @@ exports.generateMonthlyNewsletters = onSchedule(
           const selection = (await database.doc(`users/${userID}/photoOfMonthSelections/${selectionID}`).get()).data();
           if (selection?.imageURL) {
             entries.push({
-              postID: selection.postID,
+              postID: `photo-of-month-${userID}-${monthKey}`,
+              sourcePostID: selection.postID,
               authorID: userID,
               authorName: selection.authorName ?? "Blurb friend",
               answer: "",

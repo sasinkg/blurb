@@ -14,9 +14,15 @@ struct MonthlyWrappedView: View {
         if stats.answerCount > 0 { result.append(.stats) }
         if let item = stats.mostLiked, item.value > 0 { result.append(.highlight("Most liked", item, "heart.fill")) }
         if let item = stats.mostCommented, item.value > 0 { result.append(.highlight("Most discussed", item, "bubble.left.and.bubble.right.fill")) }
-        let answers = edition.entries.filter { $0.imageURL == nil && !$0.answer.isEmpty }
-        if let answer = answers.first { result.append(.answer(answer)) }
-        for photo in edition.entries.filter({ $0.imageURL != nil }).prefix(6) { result.append(.photo(photo)) }
+        let answers = edition.entries.filter { !$0.answer.isEmpty }
+        let questions = Dictionary(grouping: answers, by: \.promptID).values
+            .compactMap { responses -> (NewsletterEntry, [NewsletterEntry])? in
+                guard let first = responses.min(by: { $0.createdAt < $1.createdAt }) else { return nil }
+                return (first, responses.sorted { $0.authorName < $1.authorName })
+            }
+            .sorted { $0.0.createdAt < $1.0.createdAt }
+        result.append(contentsOf: questions.map { .question($0.0.prompt, $0.1) })
+        for photo in edition.entries.filter({ $0.imageURL != nil }) { result.append(.photo(photo)) }
         result.append(.final)
         return result
     }
@@ -95,11 +101,22 @@ struct MonthlyWrappedView: View {
                 sectionLabel(title.uppercased())
                 Text("“\(item.answer)”").font(.system(size: 30, weight: .semibold, design: .serif)).multilineTextAlignment(.center)
                 Text("BY \(item.authorName.uppercased()) · \(item.value)").font(.caption.weight(.black)).tracking(1)
-            case let .answer(entry):
-                sectionLabel("A MEMORABLE ANSWER")
-                Text(entry.prompt).font(.title2.bold()).multilineTextAlignment(.center)
-                Text("“\(entry.answer)”").font(.system(size: 29, design: .serif)).multilineTextAlignment(.center)
-                Text(entry.authorName.uppercased()).font(.caption.bold()).tracking(1)
+            case let .question(prompt, responses):
+                sectionLabel("THE MONTH IN WORDS")
+                Text(prompt).font(.system(size: 27, weight: .bold, design: .serif)).multilineTextAlignment(.center)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        ForEach(responses) { entry in
+                            VStack(alignment: .leading, spacing: 5) {
+                                Text(entry.authorName.uppercased()).font(.caption.weight(.black)).tracking(1)
+                                Text(entry.answer).font(.system(.body, design: .serif)).lineSpacing(3)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.bottom, 12)
+                            .overlay(alignment: .bottom) { Rectangle().frame(height: 1) }
+                        }
+                    }
+                }
             case let .photo(entry):
                 AsyncImage(url: URL(string: entry.imageURL ?? "")) { $0.resizable().scaledToFit() } placeholder: { ProgressView() }
                     .overlay { Rectangle().stroke(.black, lineWidth: 3) }
@@ -165,7 +182,7 @@ private struct WrappedShareImage: Transferable {
 }
 
 private enum WrappedSlide {
-    case intro, stats, highlight(String, WrappedHighlight, String), answer(NewsletterEntry), photo(NewsletterEntry), final
+    case intro, stats, highlight(String, WrappedHighlight, String), question(String, [NewsletterEntry]), photo(NewsletterEntry), final
 }
 
 enum MonthlyWrappedDemo {
