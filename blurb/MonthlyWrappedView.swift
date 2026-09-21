@@ -5,6 +5,8 @@ struct MonthlyWrappedView: View {
     let edition: NewsletterEdition
     @State private var page = 0
     @State private var shareCard: WrappedShareImage?
+    private let paper = Color(red: 0.96, green: 0.93, blue: 0.82)
+    private let accent = Color(red: 1, green: 0.78, blue: 0.02)
 
     private var slides: [WrappedSlide] {
         var result: [WrappedSlide] = [.intro]
@@ -21,15 +23,14 @@ struct MonthlyWrappedView: View {
 
     var body: some View {
         ZStack {
-            LinearGradient(colors: [.black, Color(red: 0.18, green: 0.12, blue: 0.02)], startPoint: .top, endPoint: .bottom)
-                .ignoresSafeArea()
+            paper.ignoresSafeArea()
             slide(slides[min(page, slides.count - 1)])
                 .id(page)
                 .transition(.opacity.combined(with: .scale(scale: 0.98)))
                 .padding(24)
             HStack(spacing: 5) {
                 ForEach(slides.indices, id: \.self) { index in
-                    Capsule().fill(index <= page ? .white : .white.opacity(0.3)).frame(height: 3)
+                    Capsule().fill(index <= page ? .black : .black.opacity(0.18)).frame(height: 4)
                 }
             }
             .padding(.horizontal, 16)
@@ -40,7 +41,7 @@ struct MonthlyWrappedView: View {
                 Color.clear.contentShape(Rectangle()).onTapGesture { move(1) }
             }
         }
-        .foregroundStyle(.white)
+        .foregroundStyle(.black)
         .navigationTitle(edition.monthLabel)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -69,44 +70,59 @@ struct MonthlyWrappedView: View {
 
     @ViewBuilder private func slide(_ slide: WrappedSlide) -> some View {
         VStack(spacing: 22) {
+            VStack(spacing: 8) {
+                HStack {
+                    Text("DAILY BLURB").font(.caption.weight(.black)).tracking(2)
+                    Spacer()
+                    Text("MONTHLY WRAPPED").font(.caption2.weight(.black)).tracking(1).padding(.horizontal, 8).padding(.vertical, 5).background(accent)
+                }
+                Rectangle().frame(height: 3)
+            }
             Spacer()
             switch slide {
             case .intro:
-                Image(systemName: "sparkles").font(.system(size: 58)).foregroundStyle(.yellow)
-                Text(edition.monthLabel).font(.system(size: 48, weight: .black, design: .serif)).multilineTextAlignment(.center)
-                Text("Monthly Wrapped for \(edition.groupName)").font(.title3).foregroundStyle(.white.opacity(0.75))
+                Text("SPECIAL EDITION").font(.caption.weight(.black)).tracking(2).padding(8).background(accent)
+                Text(edition.monthLabel.uppercased()).font(.system(size: 48, weight: .black, design: .serif)).multilineTextAlignment(.center)
+                Rectangle().frame(height: 1)
+                Text("The stories, people, and moments that defined \(edition.groupName)’s month.").font(.system(.title3, design: .serif)).multilineTextAlignment(.center)
             case .stats:
-                Text("The month in numbers").font(.largeTitle.bold())
+                sectionLabel("BY THE NUMBERS")
+                Text("The month in numbers").font(.system(size: 38, weight: .black, design: .serif))
                 HStack { stat(edition.stats.answerCount, "answers"); stat(edition.stats.questionCount, "questions") }
                 HStack { stat(edition.stats.photoCount, "photos"); stat(edition.stats.participatingMemberCount, "people") }
             case let .highlight(title, item, icon):
-                Image(systemName: icon).font(.system(size: 50)).foregroundStyle(.yellow)
-                Text(title).font(.largeTitle.bold())
+                Image(systemName: icon).font(.system(size: 46)).foregroundStyle(.black).padding(14).background(accent)
+                sectionLabel(title.uppercased())
                 Text("“\(item.answer)”").font(.system(size: 30, weight: .semibold, design: .serif)).multilineTextAlignment(.center)
-                Text("\(item.authorName) · \(item.value)").foregroundStyle(.secondary)
+                Text("BY \(item.authorName.uppercased()) · \(item.value)").font(.caption.weight(.black)).tracking(1)
             case let .answer(entry):
-                Text("A memorable answer").font(.headline).foregroundStyle(.yellow)
+                sectionLabel("A MEMORABLE ANSWER")
                 Text(entry.prompt).font(.title2.bold()).multilineTextAlignment(.center)
                 Text("“\(entry.answer)”").font(.system(size: 29, design: .serif)).multilineTextAlignment(.center)
                 Text(entry.authorName.uppercased()).font(.caption.bold()).tracking(1)
             case let .photo(entry):
                 AsyncImage(url: URL(string: entry.imageURL ?? "")) { $0.resizable().scaledToFit() } placeholder: { ProgressView() }
-                    .clipShape(RoundedRectangle(cornerRadius: 20))
+                    .overlay { Rectangle().stroke(.black, lineWidth: 3) }
                 Text(entry.prompt).font(.title2.bold()).multilineTextAlignment(.center)
                 Text(entry.authorName.uppercased()).font(.caption.bold()).tracking(1)
             case .final:
-                Image(systemName: "heart.circle.fill").font(.system(size: 64)).foregroundStyle(.yellow)
+                Text("FINAL EDITION").font(.caption.weight(.black)).tracking(2).padding(8).background(accent)
                 Text("That was \(edition.monthLabel)").font(.system(size: 42, weight: .black, design: .serif)).multilineTextAlignment(.center)
                 Text("A month looks different through everyone’s eyes.").font(.title3).italic().multilineTextAlignment(.center)
             }
             Spacer()
-            Text("Tap left or right to navigate").font(.caption).foregroundStyle(.white.opacity(0.55))
+            Rectangle().frame(height: 1)
+            Text("TAP LEFT OR RIGHT TO NAVIGATE").font(.system(size: 9, weight: .black)).tracking(1).foregroundStyle(.secondary)
         }
+    }
+
+    private func sectionLabel(_ text: String) -> some View {
+        Text(text).font(.caption.weight(.black)).tracking(1.4).padding(.horizontal, 9).padding(.vertical, 6).background(accent)
     }
 
     private func stat(_ value: Int, _ label: String) -> some View {
         VStack { Text("\(value)").font(.system(size: 48, weight: .black)); Text(label.uppercased()).font(.caption.bold()) }
-            .frame(maxWidth: .infinity).padding().background(.white.opacity(0.1), in: RoundedRectangle(cornerRadius: 18))
+            .frame(maxWidth: .infinity).padding().background(Color.white.opacity(0.38)).overlay { Rectangle().stroke(.black, lineWidth: 1.5) }
     }
 }
 
@@ -114,13 +130,14 @@ private struct WrappedShareCard: View {
     let edition: NewsletterEdition
     var body: some View {
         ZStack {
-            LinearGradient(colors: [.black, Color(red: 0.25, green: 0.16, blue: 0.01)], startPoint: .topLeading, endPoint: .bottomTrailing)
+            Color(red: 0.96, green: 0.93, blue: 0.82)
             VStack(alignment: .leading, spacing: 46) {
-                HStack { Text("BLURB").tracking(8); Spacer(); Image(systemName: "sparkles") }
-                    .font(.system(size: 32, weight: .black)).foregroundStyle(.yellow)
+                HStack { Text("DAILY BLURB").tracking(6); Spacer(); Text("MONTHLY WRAPPED") }
+                    .font(.system(size: 28, weight: .black))
+                Rectangle().frame(height: 6)
                 Spacer()
                 Text(edition.monthLabel.uppercased()).font(.system(size: 86, weight: .black, design: .serif))
-                Text("\(edition.groupName)’s Monthly Wrapped").font(.system(size: 40, weight: .semibold))
+                Text("\(edition.groupName)’s stories, people, and moments.").font(.system(size: 40, weight: .semibold, design: .serif))
                 HStack(spacing: 24) {
                     shareStat(edition.stats.answerCount, "ANSWERS")
                     shareStat(edition.stats.questionCount, "QUESTIONS")
@@ -129,11 +146,11 @@ private struct WrappedShareCard: View {
                 Spacer()
                 Text("A month looks different through everyone’s eyes.").font(.system(size: 30, design: .serif)).italic()
             }.padding(76)
-        }.foregroundStyle(.white)
+        }.foregroundStyle(.black)
     }
     private func shareStat(_ value: Int, _ title: String) -> some View {
         VStack(alignment: .leading, spacing: 8) { Text("\(value)").font(.system(size: 64, weight: .black)); Text(title).font(.system(size: 20, weight: .bold)).tracking(2) }
-            .frame(maxWidth: .infinity, alignment: .leading).padding(24).background(.white.opacity(0.1), in: RoundedRectangle(cornerRadius: 20))
+            .frame(maxWidth: .infinity, alignment: .leading).padding(24).background(Color(red: 1, green: 0.78, blue: 0.02)).overlay { Rectangle().stroke(.black, lineWidth: 3) }
     }
 }
 
