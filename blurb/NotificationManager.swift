@@ -122,7 +122,8 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate, Mes
     }
 
     private func save(token: String) async {
-        guard let userID = Auth.auth().currentUser?.uid else { return }
+        guard UserDefaults.standard.bool(forKey: "replyNotificationsEnabled"),
+              let userID = Auth.auth().currentUser?.uid else { return }
         try? await Firestore.firestore().collection("users").document(userID).setData([
             "fcmTokens": FieldValue.arrayUnion([token])
         ], merge: true)

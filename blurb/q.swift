@@ -74,7 +74,7 @@ struct blurbApp: App {
                 } else if auth.user == nil {
                     WelcomeView()
                 } else {
-                    ContentView()
+                    SignedInRootView()
                 }
             }
             .environmentObject(auth)

@@ -19,7 +19,7 @@ struct AppStoreScreenshotContentView: View {
 }
 #endif
 
-private func preparedJPEG(from data: Data, maxDimension: CGFloat = 1_600) -> Data? {
+func preparedJPEG(from data: Data, maxDimension: CGFloat = 1_600) -> Data? {
     guard let image = UIImage(data: data) else { return nil }
     let largestSide = max(image.size.width, image.size.height)
     guard largestSide > 0 else { return nil }
@@ -138,8 +138,13 @@ struct ContentView: View {
                                 .foregroundStyle(.secondary)
                             Text("Your groups")
                                 .font(.system(size: 36, weight: .bold, design: .serif))
-                            Text("Step into a circle to answer today’s question.")
-                                .foregroundStyle(.secondary)
+                            if !blurbStore.groups.isEmpty {
+                                let answered = blurbStore.groups.filter { blurbStore.myAnswerStatusByGroup[$0.id] == true }.count
+                                let loaded = blurbStore.groups.allSatisfy { blurbStore.myAnswerStatusByGroup[$0.id] != nil }
+                                Text(loaded ? "\(answered)/\(blurbStore.groups.count) groups answered today" : "Checking today's answers…")
+                                    .font(.subheadline.weight(.medium))
+                                    .foregroundStyle(.secondary)
+                            }
                         }
 
                         HomePromptCard(prompt: todayPrompt) {
@@ -217,7 +222,10 @@ struct ContentView: View {
     }
 
     private var todayPrompt: DailyPrompt {
-        QuestionBank.prompt(
+        if blurbStore.canAddReviewExamples {
+            return ExampleGroupContent.prompt(for: dailyPromptClock)
+        }
+        return QuestionBank.prompt(
             for: dailyPromptClock,
             birthdayPrompt: birthdayQuestion,
             birthday: birthdayQuestionsEnabled ? Date(timeIntervalSince1970: birthdayTimestamp) : nil
@@ -419,6 +427,7 @@ private struct HomeGroupCard: View {
             VibrantCardBackground(seed: group.name)
 
             VStack(alignment: .leading, spacing: 0) {
+                HStack(spacing: 8) {
                 Text(group.name)
                     .font(.system(size: 18, weight: .black, design: .serif))
                     .foregroundStyle(.black)
@@ -431,6 +440,15 @@ private struct HomeGroupCard: View {
                     .padding(.vertical, 5)
                     .background(accent)
 
+                    Spacer(minLength: 0)
+                    if let answered = blurbStore.myAnswerStatusByGroup[group.id] {
+                        Image(systemName: answered ? "checkmark" : "circle")
+                            .font(.subheadline.weight(.bold))
+                            .foregroundStyle(accent)
+                            .accessibilityLabel(answered ? "You answered today" : "You have not answered today")
+                    }
+                }
+
                 Divider()
                     .overlay(Color.primary.opacity(0.35))
                     .padding(.top, 7)
@@ -438,9 +456,9 @@ private struct HomeGroupCard: View {
 
                 HStack(alignment: .bottom) {
                     VStack(alignment: .leading, spacing: 5) {
-                        Text("\(blurbStore.answerCount(in: group.id))/\(group.memberCount)")
+                        Text("\(blurbStore.displayedAnswerCount(in: group))/\(group.displayedParticipantCount)")
                             .font(.title.bold())
-                        Text("answered today")
+                        Text(group.isExample ? "today · includes \(group.sampleParticipantCount) examples" : "answered today")
                             .font(.subheadline.weight(.medium))
                     }
 
@@ -515,16 +533,24 @@ private struct GroupFeedView: View {
     var body: some View {
         ZStack {
             GlassBackground()
+            ScrollViewReader { proxy in
             ScrollView {
                 VStack(spacing: 22) {
                     Text(group.name)
                         .font(.system(size: 38, weight: .bold, design: .serif))
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal)
-                    promptCard
+                    if group.isExample {
+                        Text("EXAMPLE GROUP · Includes three fictional participants: Maya, Jordan, and Sam. Answer today’s prompt to unlock their sample conversations. Likes and replies you add are saved in this private group.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal)
+                    }
+                    promptCard(proxy: proxy)
                     feed
                 }
                 .padding(.vertical)
+            }
             }
         }
         .navigationTitle("")
@@ -540,6 +566,12 @@ private struct GroupFeedView: View {
             }
         }
         .onAppear { blurbStore.select(group) }
+        .onChange(of: blurbStore.hasAnswered(promptID: todayPrompt.id, in: group.id)) { _, answered in
+            if !answered {
+                selectedPost = nil
+                postToEdit = nil
+            }
+        }
         .task {
             while !Task.isCancelled {
                 dailyPromptClock = .now
@@ -600,8 +632,8 @@ private struct GroupFeedView: View {
         }
     }
 
-    private var promptCard: some View {
-        VStack(spacing: 12) {
+    private func promptCard(proxy: ScrollViewProxy) -> some View {
+        VStack(spacing: 0) {
             Button { showingNewPost = true } label: {
                 VStack(alignment: .leading, spacing: 10) {
                     VStack(alignment: .leading, spacing: 8) {
@@ -648,18 +680,43 @@ private struct GroupFeedView: View {
                 }
             }
             .disabled(blurbStore.hasAnswered(promptID: todayPrompt.id, in: group.id))
+            .zIndex(1)
 
-            if let answer = blurbStore.answer(for: todayPrompt.id, in: group.id),
-               blurbStore.posts.first?.id != answer.id {
-                TodayAnswerCard(answer: answer)
+            if let answer = blurbStore.answer(for: todayPrompt.id, in: group.id) {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.3)) {
+                        proxy.scrollTo(answer.id, anchor: .top)
+                    }
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "arrow.down.to.line")
+                        Text("GO TO MY ANSWER")
+                            .tracking(0.8)
+                        Spacer()
+                        Image(systemName: "chevron.down")
+                    }
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(.primary)
+                    .padding(.horizontal, 12)
+                    .frame(minHeight: 36)
+                    .background(Color.primary.opacity(0.05))
+                    .overlay {
+                        UnevenRoundedRectangle(bottomLeadingRadius: 5, bottomTrailingRadius: 5)
+                            .stroke(Color.primary.opacity(0.22), lineWidth: 1)
+                    }
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 10)
+                .accessibilityLabel("Go to my answer")
             }
+
         }
         .padding(.horizontal)
     }
 
     private var feed: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("TODAY IN \(group.name.uppercased())")
+            Text(group.isExample ? "EXAMPLE CONVERSATIONS" : "TODAY IN \(group.name.uppercased())")
                 .font(.caption.bold())
                 .tracking(1)
                 .foregroundStyle(.secondary)
@@ -672,15 +729,16 @@ private struct GroupFeedView: View {
                     description: Text("Post your answer here before seeing this group’s conversation."))
                     .padding(.vertical, 48)
             } else {
-                ForEach(blurbStore.posts.filter { $0.promptID == todayPrompt.id }) { post in
+                ForEach(blurbStore.posts.filter { $0.groupID == group.id && ($0.promptID == todayPrompt.id || (group.isExample && $0.isSample)) }) { post in
                     PostCard(
                         post: post,
                         currentUserID: auth.user?.uid,
                         toggleLike: { Task { await blurbStore.toggleLike(post) } },
-                        editAnswer: post.authorID == auth.user?.uid && post.editCount == 0 ? { postToEdit = post } : nil,
-                        deleteAnswer: post.authorID == auth.user?.uid ? { postToDelete = post } : nil,
+                        editAnswer: !post.isSample && post.authorID == auth.user?.uid ? { postToEdit = post } : nil,
+                        deleteAnswer: !post.isSample && post.authorID == auth.user?.uid ? { postToDelete = post } : nil,
                         showComments: { selectedPost = post }
                     )
+                    .id(post.id)
                 }
             }
         }
@@ -692,7 +750,10 @@ private struct GroupFeedView: View {
     }
 
     private var todayPrompt: DailyPrompt {
-        QuestionBank.prompt(
+        if blurbStore.canAddReviewExamples {
+            return ExampleGroupContent.prompt(for: dailyPromptClock)
+        }
+        return QuestionBank.prompt(
             for: dailyPromptClock,
             birthdayPrompt: birthdayQuestion,
             birthday: birthdayQuestionsEnabled ? Date(timeIntervalSince1970: birthdayTimestamp) : nil
@@ -728,50 +789,52 @@ struct PostCard: View {
     let editAnswer: (() -> Void)?
     let deleteAnswer: (() -> Void)?
     let showComments: () -> Void
+    @State private var showingPostEditor = false
 
     private var previewComments: [BlurbComment] {
         Array((blurbStore.commentsByPostID[post.id] ?? []).prefix(2))
     }
 
+    private var badgeProgress: [AchievementProgress] {
+        post.isSample ? [] : blurbStore.achievements(for: post.authorID, in: post.groupID)
+    }
+
+    private var hasEarnedBadges: Bool {
+        badgeProgress.contains { $0.earned != nil }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                AsyncImage(url: URL(string: post.authorPhotoURL ?? "")) { image in
-                    image.resizable().scaledToFill()
-                } placeholder: {
-                    Image(systemName: "person.crop.circle.fill")
-                        .symbolRenderingMode(.hierarchical)
-                        .foregroundStyle(.indigo)
-                }
-                .font(.title)
-                .frame(width: 38, height: 38)
-                .clipShape(Circle())
+            VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: hasEarnedBadges ? .top : .center, spacing: 12) {
+                ProfilePhoto(urlString: post.authorPhotoURL, size: 38)
+                    .fixedSize()
 
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 7) {
-                        Text(post.authorName)
-                            .font(.headline)
-
-                        if let rankColor {
-                            Image(systemName: "medal.fill")
-                                .font(.caption)
-                                .foregroundStyle(rankColor)
-                                .accessibilityLabel(placementLabel ?? "Ranked answer")
+                VStack(alignment: .leading, spacing: 5) {
+                    ViewThatFits(in: .horizontal) {
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Text(memberNameText(post.authorName, userID: post.isSample ? nil : post.authorID))
+                                .font(.headline)
+                                .fixedSize(horizontal: true, vertical: false)
+                            postMetadata
+                        }
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(memberNameText(post.authorName, userID: post.isSample ? nil : post.authorID))
+                                .font(.headline)
+                                .fixedSize(horizontal: false, vertical: true)
+                            postMetadata
                         }
                     }
-
-                    Text(post.timeLabel)
-                        .font(.subheadline)
-                        .foregroundStyle(post.timeLabel == "On time" ? .green : .secondary)
+                    if hasEarnedBadges {
+                        EarnedBadges(progress: badgeProgress)
+                    }
                 }
-
-                Spacer()
+                .frame(maxWidth: .infinity, alignment: .leading)
 
                 if editAnswer != nil || deleteAnswer != nil {
                     Menu {
-                        if let editAnswer {
-                            Button("Edit answer", action: editAnswer)
+                        if editAnswer != nil {
+                            Button("Edit answer") { showingPostEditor = true }
                         }
                         if let deleteAnswer {
                             Button("Delete answer", role: .destructive, action: deleteAnswer)
@@ -779,6 +842,8 @@ struct PostCard: View {
                     } label: {
                         Image(systemName: "ellipsis")
                             .foregroundStyle(.secondary)
+                            .frame(width: 44, height: 44)
+                            .contentShape(Rectangle())
                     }
                 } else {
                     Image(systemName: "ellipsis")
@@ -786,7 +851,12 @@ struct PostCard: View {
                 }
             }
 
-            Text(post.answer)
+            if post.isSample {
+                Text("SAMPLE · \(ExampleGroupContent.question)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Text(mentionText(post.answer))
                 .font(.body)
 
             if let imageURL = post.imageURL {
@@ -802,48 +872,35 @@ struct PostCard: View {
                 .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
             }
 
-            HStack(spacing: 0) {
+            HStack(spacing: 18) {
                 Button(action: toggleLike) {
-                    HStack(spacing: 5) {
+                    HStack(spacing: 6) {
                         Image(systemName: post.likeIDs.contains(currentUserID ?? "") ? "heart.fill" : "heart")
-                        Text("LIKE")
-                            .font(.caption2.weight(.black))
-                            .tracking(0.7)
-                        Text("\(post.likeCount)")
-                            .font(.caption2.monospacedDigit())
+                        Text("\(post.likeCount)").font(.caption.monospacedDigit())
                     }
-                    .font(.caption)
                     .foregroundStyle(post.likeIDs.contains(currentUserID ?? "") ? .red : .secondary)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 7)
+                    .frame(minWidth: 44, minHeight: 44)
+                    .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
-
-                Rectangle()
-                    .fill(Color.primary.opacity(0.18))
-                    .frame(width: 1, height: 18)
+                .accessibilityLabel(post.likeIDs.contains(currentUserID ?? "") ? "Unlike answer" : "Like answer")
+                .accessibilityValue("\(post.likeCount) likes")
 
                 Button(action: showComments) {
-                    HStack(spacing: 5) {
-                        Image(systemName: "bubble.right.fill")
-                        Text("REPLY")
-                            .font(.caption2.weight(.black))
-                            .tracking(0.7)
-                        Text("\(post.commentCount)")
-                            .font(.caption2.monospacedDigit())
+                    HStack(spacing: 6) {
+                        Image(systemName: "bubble.right")
+                        Text("\(post.commentCount)").font(.caption.monospacedDigit())
                     }
-                    .font(.caption)
-                    .foregroundStyle(colorScheme == .dark ? Color.yellow : Color(red: 0.62, green: 0.44, blue: 0))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 7)
+                    .foregroundStyle(replyAccent)
+                    .frame(minWidth: 44, minHeight: 44)
+                    .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .accessibilityLabel("Open replies")
+                .accessibilityValue("\(post.commentCount) replies")
+                Spacer(minLength: 0)
             }
-            .background(Color.primary.opacity(colorScheme == .dark ? 0.06 : 0.035))
-            .overlay {
-                Rectangle()
-                    .stroke(Color.primary.opacity(0.2), lineWidth: 1)
-            }
+            .font(.subheadline)
+            .buttonStyle(.plain)
+            .padding(.vertical, -6)
 
             }
             .padding(14)
@@ -858,7 +915,7 @@ struct PostCard: View {
             if !previewComments.isEmpty {
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(previewComments) { comment in
-                        CompactCommentRow(comment: comment)
+                        CompactCommentRow(comment: comment, post: post)
                         if comment.id != previewComments.last?.id {
                             Rectangle()
                                 .fill(Color.primary.opacity(0.1))
@@ -879,10 +936,13 @@ struct PostCard: View {
                     }
                 }
                 .padding(.horizontal, 14)
-                .padding(.top, 8)
-                .padding(.bottom, 7)
+                .padding(.top, 4)
+                .padding(.bottom, 4)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(commentTabFill)
+                .contentShape(Rectangle())
+                .onTapGesture(perform: showComments)
+                .accessibilityAction(named: "Open all replies", showComments)
                 .overlay {
                     UnevenRoundedRectangle(
                         topLeadingRadius: 0,
@@ -906,6 +966,24 @@ struct PostCard: View {
         }
         .onAppear { blurbStore.listenForComments(on: post) }
         .onDisappear { blurbStore.stopListeningForComments(on: post.id) }
+        .sheet(isPresented: $showingPostEditor) {
+            PostAnswerEditor(post: post)
+        }
+        .modifier(MemberProfileLinks(groupID: post.groupID))
+    }
+
+    private var postMetadata: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            if let rankColor {
+                Label(placementLabel ?? "", systemImage: "medal.fill")
+                    .foregroundStyle(rankColor)
+                    .accessibilityLabel(placementLabel ?? "Ranked answer")
+            }
+            Text(post.timeLabel)
+                .foregroundStyle(.secondary)
+        }
+        .font(.caption2)
+        .fixedSize(horizontal: true, vertical: false)
     }
 
     private var cardFill: Color {
@@ -929,6 +1007,7 @@ struct PostCard: View {
         case 1: return Color(red: 0.92, green: 0.68, blue: 0.05)
         case 2: return Color.gray
         case 3: return Color(red: 0.65, green: 0.38, blue: 0.18)
+        case 4...: return .secondary
         default: return nil
         }
     }
@@ -939,9 +1018,13 @@ struct PostCard: View {
 
     private var placementLabel: String? {
         switch currentRank {
-        case 1: return "1st place!"
-        case 2: return "2nd place"
-        case 3: return "3rd place"
+        case 1: return "1st"
+        case 2: return "2nd"
+        case 3: return "3rd"
+        case 4...:
+            let formatter = NumberFormatter()
+            formatter.numberStyle = .ordinal
+            return formatter.string(from: NSNumber(value: currentRank))
         default: return nil
         }
     }
@@ -949,19 +1032,18 @@ struct PostCard: View {
 
 private struct CompactCommentRow: View {
     let comment: BlurbComment
+    let post: BlurbPost
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 4) {
-            Text(comment.authorName + ":")
-                .font(.caption2.weight(.bold))
-                .lineLimit(1)
-            Text(comment.text)
-                .font(.caption2)
-                .lineLimit(1)
-            Spacer(minLength: 0)
-        }
-        .padding(.vertical, 3)
+        HStack(alignment: .center, spacing: 8) {
+        (Text(memberNameText(comment.authorName + ": ", userID: comment.authorID)).bold() + Text(mentionText(comment.text)))
+            .font(.caption2)
+            .lineLimit(2)
+            .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
+            ReplyLikeButton(comment: comment, post: post, compact: true)
+        }
+        .modifier(OwnReplyActions(comment: comment, post: post))
     }
 }
 
@@ -1022,10 +1104,17 @@ private struct GrowingAnswerField: UIViewRepresentable {
         textView.textContainer.lineFragmentPadding = 0
         textView.isScrollEnabled = false
         textView.delegate = context.coordinator
+        let keyboardToolbar = UIToolbar()
+        keyboardToolbar.sizeToFit()
+        keyboardToolbar.items = [
+            UIBarButtonItem(systemItem: .flexibleSpace),
+            UIBarButtonItem(title: "Done", style: .done, target: textView,
+                            action: #selector(UIResponder.resignFirstResponder))
+        ]
+        textView.inputAccessoryView = keyboardToolbar
         textView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         DispatchQueue.main.async {
-            textView.becomeFirstResponder()
             context.coordinator.updateHeight(for: textView)
         }
         return textView
@@ -1073,6 +1162,7 @@ private struct GrowingAnswerField: UIViewRepresentable {
 }
 
 struct NewPostView: View {
+    @EnvironmentObject private var blurbStore: BlurbStore
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
     @State private var answer: String
@@ -1110,7 +1200,8 @@ struct NewPostView: View {
             ZStack {
                 GlassBackground()
 
-                VStack(spacing: 20) {
+                ScrollView {
+                VStack(spacing: 16) {
                     Text(prompt)
                         .font(.system(size: 27, weight: .bold, design: .serif))
                         .foregroundStyle(.primary)
@@ -1148,6 +1239,7 @@ struct NewPostView: View {
                     }
 
                     if pollOptions.isEmpty {
+                    MentionSuggestions(text: $answer, names: blurbStore.mentionNames())
                     HStack(alignment: .top, spacing: 10) {
                         ZStack(alignment: .leading) {
                             if answer.isEmpty {
@@ -1247,8 +1339,17 @@ struct NewPostView: View {
                     Spacer()
                 }
                 .padding()
+                }
+                .scrollDismissesKeyboard(.interactively)
             }
             .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button(initialAnswer == nil ? "Post" : "Save") {
+                        if initialAnswer == nil { submitAnswer() }
+                        else { showingEditWarning = true }
+                    }
+                    .disabled(!canSubmit)
+                }
                 ToolbarItem(placement: .topBarLeading) {
                     Button("Cancel") {
                         dismiss()
@@ -1265,6 +1366,7 @@ struct NewPostView: View {
                 }
             }
             .onChange(of: photoItem) { _, item in
+                UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
                 Task {
                     guard let original = try? await item?.loadTransferable(type: Data.self) else { return }
                     photoData = preparedJPEG(from: original)
@@ -1295,6 +1397,7 @@ struct NewPostView: View {
     private func submitAnswer() {
         let trimmedAnswer = answer.trimmingCharacters(in: .whitespacesAndNewlines)
         guard (!trimmedAnswer.isEmpty || (requiresPhoto && photoData != nil)), !isSubmitting else { return }
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
         isSubmitting = true
         Task {
             if await onPost(trimmedAnswer, photoData) { dismiss() }
@@ -1329,50 +1432,53 @@ struct CommentsView: View {
                 GlassBackground()
 
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 24) {
-                        VStack(alignment: .leading, spacing: 5) {
-                            Text("THE REPLY DESK")
-                                .font(.caption.weight(.black))
-                                .tracking(2)
-                                .foregroundStyle(.black)
-                                .padding(.horizontal, 9)
+                    VStack(alignment: .leading, spacing: 16) {
+                        HStack(alignment: .firstTextBaseline) {
+                            Text("The reply desk")
+                                .font(.system(.title2, design: .serif).bold())
+                            Spacer()
+                            Text("\(comments.count) \(comments.count == 1 ? "REPLY" : "REPLIES")")
+                                .font(.caption2.weight(.black))
+                                .tracking(0.8)
+                                .padding(.horizontal, 8)
                                 .padding(.vertical, 5)
-                                .background(accent)
-                            Text("Comments")
-                                .font(.system(size: 38, weight: .bold, design: .serif))
-                            Text("Join the conversation below.")
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(.black)
+                                .background(Color(red: 1, green: 0.78, blue: 0.02))
                         }
 
-                        VStack(alignment: .leading, spacing: 14) {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("IN RESPONSE TO")
+                                .font(.system(.caption2, design: .serif).weight(.black))
+                                .tracking(1.2)
+                                .foregroundStyle(.secondary)
                             HStack(spacing: 11) {
-                                ProfilePhoto(urlString: post.authorPhotoURL, size: 42)
+                                ProfilePhoto(urlString: post.authorPhotoURL, size: 34)
                                 VStack(alignment: .leading, spacing: 2) {
-                                    Text(post.authorName)
-                                        .font(.system(.headline, design: .serif).bold())
+                                    Text(memberNameText(post.authorName, userID: post.isSample ? nil : post.authorID))
+                                        .font(.system(.subheadline, design: .serif).bold())
                                     Text(post.timeLabel)
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                 }
                             }
-                            Rectangle().fill(Color.primary.opacity(0.18)).frame(height: 1)
-                            Text(post.answer)
-                                .font(.system(.body, design: .serif))
-                                .lineSpacing(3)
+                            Text(mentionText(post.answer))
+                                .font(.system(.subheadline, design: .serif))
+                                .lineSpacing(2)
+                            if let imageURL = post.imageURL {
+                                AsyncImage(url: URL(string: imageURL)) { image in
+                                    image.resizable().scaledToFit()
+                                } placeholder: { ProgressView() }
+                                .frame(maxHeight: 150)
+                                .clipShape(RoundedRectangle(cornerRadius: 4))
+                            }
                         }
-                        .padding(16)
+                        .padding(14)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(colorScheme == .dark ? Color.white.opacity(0.06) : Color.white.opacity(0.55))
-                        .overlay { Rectangle().stroke(borderColor, lineWidth: 1.5) }
+                        .overlay(alignment: .leading) { Rectangle().fill(accent).frame(width: 3) }
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
 
-                        VStack(alignment: .leading, spacing: 12) {
-                            HStack {
-                                Text("REPLIES").font(.caption.weight(.black)).tracking(1.5)
-                                Spacer()
-                                Text("\(comments.count)").font(.caption.monospacedDigit().bold()).foregroundStyle(.secondary)
-                            }
-                            Rectangle().fill(Color.primary.opacity(0.35)).frame(height: 1)
+                        VStack(alignment: .leading, spacing: 6) {
                             if comments.isEmpty {
                                 VStack(spacing: 10) {
                                     Image(systemName: "text.bubble")
@@ -1385,19 +1491,21 @@ struct CommentsView: View {
                                         .foregroundStyle(.secondary)
                                 }
                                 .frame(maxWidth: .infinity)
-                                .padding(.vertical, 42)
+                                .padding(.vertical, 24)
                             } else {
                                 ForEach(comments) { comment in
-                                    CommentRow(comment: comment, accent: accent)
+                                    CommentRow(comment: comment, post: post, accent: accent)
                                     if comment.id != comments.last?.id {
-                                        Rectangle().fill(Color.primary.opacity(0.12)).frame(height: 1)
+                                        Rectangle().fill(Color.primary.opacity(0.10)).frame(height: 1).padding(.leading, 43)
                                     }
                                 }
                             }
                         }
                     }
-                    .padding(20)
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 10)
                 }
+                .scrollDismissesKeyboard(.interactively)
             }
             .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
@@ -1407,38 +1515,44 @@ struct CommentsView: View {
                 }
             }
             .safeAreaInset(edge: .bottom) {
+                VStack(spacing: 6) {
+                    MentionSuggestions(text: $newComment, names: blurbStore.mentionNames(in: post.groupID))
                 HStack(spacing: 10) {
                     TextField("Write a reply…", text: $newComment, axis: .vertical)
+                        .font(.subheadline)
                         .lineLimit(1...4)
                         .padding(.horizontal, 14)
-                        .padding(.vertical, 12)
-                        .background(colorScheme == .dark ? Color.white.opacity(0.08) : Color.white.opacity(0.72))
-                        .overlay { Rectangle().stroke(borderColor, lineWidth: 1.5) }
+                        .padding(.vertical, 10)
+                        .background(colorScheme == .dark ? Color.white.opacity(0.06) : Color.white.opacity(0.6), in: RoundedRectangle(cornerRadius: 6))
+                        .overlay { RoundedRectangle(cornerRadius: 6).stroke(Color.primary.opacity(0.16), lineWidth: 1) }
 
                     Button { sendComment() } label: {
                         Group {
                             if isSending {
                                 ProgressView().tint(.black)
                             } else {
-                                Image(systemName: "paperplane.fill")
+                                Image(systemName: "arrow.up")
                             }
                         }
                         .font(.headline)
                         .foregroundStyle(.black)
-                        .frame(width: 48, height: 48)
-                        .background(accent)
+                        .frame(width: 44, height: 44)
+                        .background(accent, in: RoundedRectangle(cornerRadius: 6))
                     }
+                    .accessibilityLabel("Send reply")
                     .disabled(isSending || newComment.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     .opacity(newComment.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0.45 : 1)
                 }
                 .padding(.horizontal, 16)
-                .padding(.vertical, 10)
+                .padding(.vertical, 6)
                 .background(.ultraThinMaterial)
                 .overlay(alignment: .top) { Rectangle().fill(Color.primary.opacity(0.18)).frame(height: 1) }
+                }
             }
             .onAppear { blurbStore.listenForComments(on: post) }
             .onDisappear { blurbStore.stopListeningForComments(on: post.id) }
         }
+        .modifier(MemberProfileLinks(groupID: post.groupID))
     }
 
     private func sendComment() {
@@ -1455,28 +1569,41 @@ struct CommentsView: View {
 }
 
 private struct CommentRow: View {
+    @EnvironmentObject private var auth: AuthManager
+    @State private var editing = false
     let comment: BlurbComment
+    let post: BlurbPost
     let accent: Color
 
     var body: some View {
         HStack(alignment: .top, spacing: 11) {
-            ProfilePhoto(urlString: comment.authorPhotoURL, size: 36)
-            VStack(alignment: .leading, spacing: 5) {
-                Text(comment.authorName)
-                    .font(.system(.headline, design: .serif).bold())
-                Text(comment.text)
-                    .font(.system(.body, design: .serif))
-                    .lineSpacing(3)
+            ProfilePhoto(urlString: comment.authorPhotoURL, size: 32)
+                .padding(.top, 6)
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(spacing: 8) {
+                    Text(memberNameText(comment.authorName, userID: comment.authorID))
+                        .font(.system(.subheadline, design: .serif).bold())
+                    Text(comment.createdAt, style: .relative)
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                    Spacer(minLength: 4)
+                    if comment.authorID == auth.user?.uid {
+                        Button { editing = true } label: { Image(systemName: "pencil") }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Edit reply")
+                    }
+                    ReplyLikeButton(comment: comment, post: post)
+                }
+                Text(mentionText(comment.text))
+                    .font(.system(.subheadline, design: .serif))
+                    .lineSpacing(1)
             }
         }
-        .padding(.vertical, 7)
-        .overlay(alignment: .leading) {
-            Rectangle()
-                .fill(accent)
-                .frame(width: 3)
-                .offset(x: -9)
-        }
-        .padding(.leading, 9)
+        .padding(.vertical, 2)
+        .padding(.vertical, 3)
+        .sheet(isPresented: $editing) { EditReplyView(comment: comment, post: post) }
+        .modifier(OwnReplyActions(comment: comment, post: post))
     }
 }
 
@@ -1583,7 +1710,9 @@ struct GroupCard: View {
                     .font(.headline)
                     .foregroundStyle(.primary)
 
-                Text("\(group.memberCount) members")
+                Text(group.isExample
+                     ? "\(group.displayedParticipantCount) participants · \(group.sampleParticipantCount) examples"
+                     : "\(group.memberCount) members")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
@@ -1806,14 +1935,17 @@ struct ProfileView: View {
 
                             Divider().overlay(Color.primary.opacity(0.35))
 
-                            BadgeRow(icon: "flame.fill", title: "On a roll", subtitle: "Answer 7 daily blurbs in a row")
-                            BadgeRow(icon: "brain.head.profile", title: "Trivia ace", subtitle: "Get 5 weekly trivia answers right")
-                            BadgeRow(icon: "person.3.fill", title: "Group regular", subtitle: "Share with a group 10 times")
+                            Text("Progress in \(blurbStore.selectedGroup?.name ?? "your group")")
+                                .font(.caption).foregroundStyle(.secondary)
+                            ForEach(blurbStore.myAchievements) { progress in
+                                AchievementRow(progress: progress)
+                            }
                             if let winner = blurbStore.lastMonthWinner {
                                 BadgeRow(
                                     icon: "crown.fill",
                                     title: winner.title,
-                                    subtitle: "Finished first in your group with \(winner.points) points"
+                                    subtitle: "Finished first in your group with \(winner.points) points",
+                                    earned: true
                                 )
                             }
                         }
@@ -1856,6 +1988,7 @@ struct ProfilePhoto: View {
                 .padding(size * 0.08)
         }
         .frame(width: size, height: size)
+        .fixedSize()
         .background(.indigo.opacity(0.10), in: Circle())
         .clipShape(Circle())
     }
@@ -1978,6 +2111,7 @@ struct BadgeRow: View {
     let icon: String
     let title: String
     let subtitle: String
+    var earned = false
 
     var body: some View {
         HStack(spacing: 13) {
@@ -2004,7 +2138,7 @@ struct BadgeRow: View {
             }
 
             Spacer()
-            Image(systemName: "lock.fill")
+            Image(systemName: earned ? "checkmark.seal.fill" : "lock.fill")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -2030,6 +2164,7 @@ struct SettingsView: View {
     @State private var showingCreateGroup = false
     @State private var showingJoinGroup = false
     @State private var copiedGroupName: String?
+    @State private var copiedItem = "Link"
     @State private var showingDeleteAccount = false
     @State private var isDeletingAccount = false
     @State private var reminderErrorMessage: String?
@@ -2064,6 +2199,12 @@ struct SettingsView: View {
                                         canEdit: blurbStore.canEdit(group),
                                         copyLink: {
                                             UIPasteboard.general.string = "https://blurb.app/join/\(group.inviteCode)"
+                                            copiedItem = "Link"
+                                            copiedGroupName = group.name
+                                        },
+                                        copyCode: {
+                                            UIPasteboard.general.string = group.inviteCode
+                                            copiedItem = "Code"
                                             copiedGroupName = group.name
                                         },
                                         edit: { groupToRename = group }
@@ -2083,6 +2224,15 @@ struct SettingsView: View {
                             .font(.subheadline.bold())
                         }
 
+                        if blurbStore.canAddReviewExamples {
+                            settingsCard(title: "REVIEW EXAMPLES") {
+                                AddExampleGroupButton()
+                                Text("Add a private example group with fictional answers and replies.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+
                         settingsCard(title: "REMINDERS") {
                             Toggle("Daily Blurb reminder", isOn: $dailyReminderEnabled)
                                 .onChange(of: dailyReminderEnabled) { _, enabled in
@@ -2092,7 +2242,7 @@ struct SettingsView: View {
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                             Toggle("Weekly Trivia", isOn: $weeklyTriviaEnabled)
-                            Toggle("Replies to your answers", isOn: $replyNotificationsEnabled)
+                            Toggle("Replies and @mentions", isOn: $replyNotificationsEnabled)
                                 .onChange(of: replyNotificationsEnabled) { _, enabled in
                                     updateReplyNotifications(enabled: enabled)
                                 }
@@ -2157,13 +2307,13 @@ struct SettingsView: View {
                 RenameGroupView(group: group)
                     .presentationBackground(.ultraThinMaterial)
             }
-            .alert("Link copied", isPresented: Binding(
+            .alert("\(copiedItem) copied", isPresented: Binding(
                 get: { copiedGroupName != nil },
                 set: { if !$0 { copiedGroupName = nil } }
             )) {
                 Button("OK", role: .cancel) { copiedGroupName = nil }
             } message: {
-                Text("The invite link for \(copiedGroupName ?? "this group") is ready to share.")
+                Text("The invite \(copiedItem.lowercased()) for \(copiedGroupName ?? "this group") is ready to share.")
             }
             .confirmationDialog(
                 "Permanently delete your account?",
@@ -2255,6 +2405,7 @@ private struct SettingsGroupRow: View {
     let group: BlurbGroup
     let canEdit: Bool
     let copyLink: () -> Void
+    let copyCode: () -> Void
     let edit: () -> Void
 
     var body: some View {
@@ -2267,12 +2418,15 @@ private struct SettingsGroupRow: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
-            Button(action: copyLink) {
-                Image(systemName: "link")
+            Menu {
+                Button("Copy group code", systemImage: "number", action: copyCode)
+                Button("Copy invite link", systemImage: "link", action: copyLink)
+            } label: {
+                Image(systemName: "square.and.arrow.up")
                     .frame(width: 34, height: 34)
             }
             .buttonStyle(.bordered)
-            .accessibilityLabel("Copy invite link for \(group.name)")
+            .accessibilityLabel("Share \(group.name)")
 
             Button(action: edit) {
                 Image(systemName: "pencil")
@@ -2322,6 +2476,7 @@ private struct JoinGroupView: View {
 private struct GroupOnboardingView: View {
     @Environment(\.colorScheme) private var colorScheme
     @EnvironmentObject private var auth: AuthManager
+    @EnvironmentObject private var blurbStore: BlurbStore
     @State private var showingCreateGroup = false
     @State private var showingJoinGroup = false
 
@@ -2386,6 +2541,12 @@ private struct GroupOnboardingView: View {
                     }
                 }
                 .buttonStyle(.plain)
+
+                if blurbStore.canAddReviewExamples {
+                    AddExampleGroupButton()
+                        .font(.headline)
+                        .padding(.vertical, 8)
+                }
 
                 Spacer()
 
@@ -2493,4 +2654,441 @@ struct GlassBackground: View {
 
 #Preview {
     ContentView()
+}
+
+
+private struct EarnedBadgeLabel: View {
+    let tier: AchievementTier
+    @ScaledMetric(relativeTo: .caption2) private var textSize: CGFloat = 9
+
+    var body: some View {
+        HStack(spacing: 4) {
+            AnimatedBadgeIcon(systemName: tier.icon)
+            Text(tier.title.uppercased())
+                .tracking(0.5)
+        }
+        .font(.system(size: textSize, weight: .black, design: .serif))
+        .foregroundStyle(.black)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 3)
+        .background(Color(red: 1, green: 0.78, blue: 0.02))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(tier.title)
+    }
+}
+
+private struct EarnedBadges: View {
+    let progress: [AchievementProgress]
+    var body: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 4) {
+                ForEach(progress.filter { $0.earned != nil }) { item in
+                    EarnedBadgeLabel(tier: item.earned!)
+                        .fixedSize(horizontal: true, vertical: false)
+                }
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(progress.filter { $0.earned != nil }) { item in
+                    EarnedBadgeLabel(tier: item.earned!)
+                }
+            }
+        }
+    }
+}
+
+private struct AchievementRow: View {
+    let progress: AchievementProgress
+    var body: some View {
+        let tier = progress.earned ?? progress.tiers[0]
+        let color = Color(red: 1, green: 0.78, blue: 0.02)
+        HStack(spacing: 12) {
+            AnimatedBadgeIcon(systemName: tier.icon, enabled: progress.earned != nil)
+                .font(.title2.bold())
+                .frame(width: 48, height: 48)
+                .background(color, in: Rectangle())
+                .foregroundStyle(.black)
+                .overlay(alignment: .bottomTrailing) {
+                    if let rank = progress.earnedIndex {
+                        Text("\(rank + 1)").font(.caption2.bold())
+                            .padding(3).background(.regularMaterial, in: Circle())
+                    }
+                }
+            VStack(alignment: .leading, spacing: 5) {
+                Text(tier.title).font(.headline)
+                if let next = progress.next {
+                    Text("\(progress.value)/\(next.threshold) \(progress.unit) · Next: \(next.title)")
+                        .font(.caption).foregroundStyle(.secondary)
+                    ProgressView(value: Double(progress.value), total: Double(next.threshold)).tint(color)
+                } else {
+                    Text("Top rank · \(progress.value) \(progress.unit)").font(.caption)
+                }
+            }
+            Image(systemName: progress.earned == nil ? "lock.fill" : "checkmark.seal.fill")
+                .foregroundStyle(color)
+        }
+        .padding(.vertical, 8)
+    }
+}
+
+private struct MentionSuggestions: View {
+    @Binding var text: String
+    let names: [String]
+    private var query: String? {
+        guard let token = text.split(whereSeparator: { $0.isWhitespace }).last,
+              !text.hasSuffix(" "), !text.hasSuffix("\n"), token.hasPrefix("@") else { return nil }
+        return String(token.dropFirst())
+    }
+    var body: some View {
+        if let query {
+            ScrollView(.horizontal) {
+                HStack {
+                    ForEach(names.filter {
+                        query.isEmpty || $0.lowercased().hasPrefix(query.lowercased())
+                    }, id: \.self) { name in
+                        Button {
+                            guard let range = text.range(of: "@", options: .backwards) else { return }
+                            let firstName = name.split(whereSeparator: { $0.isWhitespace }).first.map(String.init) ?? name
+                            text.replaceSubrange(range.lowerBound..., with: "@" + firstName + " ")
+                        } label: {
+                            Text("@" + name).font(.caption.bold()).padding(8)
+                                .background(.blue.opacity(0.12), in: Capsule())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            .accessibilityLabel("Mention someone by first name")
+        }
+    }
+}
+
+
+private func mentionText(_ text: String) -> AttributedString {
+    var result = AttributedString(text)
+    guard let regex = try? NSRegularExpression(pattern: "(?<![\\p{L}\\p{N}_])@[\\p{L}\\p{M}][\\p{L}\\p{M}\\p{N}_’-]*") else { return result }
+    for match in regex.matches(in: text, range: NSRange(text.startIndex..., in: text)) {
+        guard let range = Range(match.range, in: text),
+              let attributedRange = Range(range, in: result) else { continue }
+        result[attributedRange].link = memberURL(kind: "mention", value: String(text[range].dropFirst()))
+        result[attributedRange].foregroundColor = .blue
+        result[attributedRange].inlinePresentationIntent = .stronglyEmphasized
+    }
+    return result
+}
+
+
+private func memberURL(kind: String, value: String) -> URL? {
+    var components = URLComponents()
+    components.scheme = "blurb-member"
+    components.host = kind
+    components.queryItems = [URLQueryItem(name: "value", value: value)]
+    return components.url
+}
+
+private func memberNameText(_ name: String, userID: String?) -> AttributedString {
+    var text = AttributedString(name)
+    if let userID {
+        text.link = memberURL(kind: "id", value: userID)
+        text.foregroundColor = .primary
+    }
+    return text
+}
+
+private struct MemberProfileRoute: Identifiable {
+    let id = UUID()
+    let memberID: String?
+    let firstName: String?
+}
+
+private struct MemberProfileLinks: ViewModifier {
+    let groupID: String
+    @State private var route: MemberProfileRoute?
+
+    func body(content: Content) -> some View {
+        content
+            .environment(\.openURL, OpenURLAction { url in
+                guard url.scheme == "blurb-member",
+                      let value = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "value" })?.value else {
+                    return .systemAction
+                }
+                route = MemberProfileRoute(memberID: url.host == "id" ? value : nil,
+                                           firstName: url.host == "mention" ? value : nil)
+                return .handled
+            })
+            .sheet(item: $route) { route in
+                MemberProfileSheet(groupID: groupID, route: route)
+            }
+    }
+}
+
+private struct MemberProfileSheet: View {
+    @EnvironmentObject private var blurbStore: BlurbStore
+    @Environment(\.dismiss) private var dismiss
+    let groupID: String
+    let route: MemberProfileRoute
+    @State private var selectedMember: GroupMemberProfile?
+    @State private var expandedPhoto = false
+
+    private var matches: [GroupMemberProfile] {
+        blurbStore.memberProfiles(in: groupID).filter { member in
+            if let id = route.memberID { return member.id == id }
+            let firstName = member.name.split(whereSeparator: { $0.isWhitespace }).first.map(String.init) ?? member.name
+            return firstName.compare(route.firstName ?? "", options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame
+        }
+    }
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                GlassBackground()
+                if let member = selectedMember ?? (matches.count == 1 ? matches.first : nil) {
+                    ScrollView {
+                        VStack(spacing: 18) {
+                            Button { expandedPhoto = true } label: {
+                                ProfilePhoto(urlString: member.photoURL, size: 100)
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(member.photoURL == nil)
+                            .accessibilityLabel("Enlarge \(member.name)'s profile photo")
+                            Text(member.name).font(.system(.title, design: .serif).bold())
+                            Text(blurbStore.groups.first { $0.id == groupID }?.name ?? "Group member")
+                                .foregroundStyle(.secondary)
+                            let progress = blurbStore.achievements(for: member.id, in: groupID)
+                            EarnedBadges(progress: progress)
+                            if progress.allSatisfy({ $0.earned == nil }) {
+                                Text("No badges earned yet").font(.subheadline).foregroundStyle(.secondary)
+                            }
+                            VStack(alignment: .leading, spacing: 12) {
+                                Text("GROUP ACHIEVEMENTS").font(.caption.bold()).tracking(1)
+                                ForEach(progress) { item in AchievementRow(progress: item) }
+                            }
+                            .padding(16)
+                            .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 6))
+                        }
+                        .padding(24)
+                    }
+                    .sheet(isPresented: $expandedPhoto) {
+                        NavigationStack {
+                            AsyncImage(url: URL(string: member.photoURL ?? "")) { image in
+                                image.resizable().scaledToFit()
+                            } placeholder: { ProgressView() }
+                            .padding()
+                            .navigationTitle(member.name)
+                            .navigationBarTitleDisplayMode(.inline)
+                            .toolbar {
+                                ToolbarItem(placement: .confirmationAction) {
+                                    Button("Done") { expandedPhoto = false }
+                                }
+                            }
+                        }
+                    }
+                } else if matches.isEmpty {
+                    ContentUnavailableView("Profile unavailable", systemImage: "person.crop.circle.badge.questionmark",
+                        description: Text("This name could not be matched to a current member's shared answers or replies in this group."))
+                } else {
+                    List(matches) { member in
+                        Button { selectedMember = member } label: {
+                            HStack(spacing: 12) {
+                                ProfilePhoto(urlString: member.photoURL, size: 38)
+                                Text(member.name).foregroundStyle(.primary)
+                            }
+                        }
+                    }
+                }
+            }
+            .navigationTitle(matches.count > 1 && selectedMember == nil ? "Who did you mean?" : "Member profile")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
+            }
+        }
+    }
+}
+
+
+private struct ReplyLikeButton: View {
+    @EnvironmentObject private var auth: AuthManager
+    @EnvironmentObject private var blurbStore: BlurbStore
+    @State private var updating = false
+    let comment: BlurbComment
+    let post: BlurbPost
+    var compact = false
+    private var liked: Bool { comment.likeIDs.contains(auth.user?.uid ?? "") }
+
+    var body: some View {
+        Button {
+            updating = true
+            Task {
+                await blurbStore.toggleCommentLike(comment, on: post)
+                updating = false
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: liked ? "heart.fill" : "heart")
+                Text("\(comment.likeIDs.count)").monospacedDigit()
+            }
+            .font(.caption2)
+            .foregroundStyle(liked ? .red : .secondary)
+            .frame(minWidth: compact ? 32 : 44, minHeight: compact ? 22 : 44)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(updating || auth.user == nil)
+        .accessibilityLabel(liked ? "Unlike reply" : "Like reply")
+        .accessibilityValue("\(comment.likeIDs.count) likes")
+    }
+}
+
+
+/// Animate only the glyph so the compact badge and text never shift layout.
+private struct AnimatedBadgeIcon: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var visible = true
+    let systemName: String
+    var enabled = true
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 15.0,
+                                paused: !enabled || reduceMotion || !visible || scenePhase != .active)) { context in
+            let moving = enabled && !reduceMotion && visible && scenePhase == .active
+            let time = moving ? context.date.timeIntervalSinceReferenceDate : 0
+            let flame = systemName.contains("flame")
+            let wave = moving ? sin(time * (flame ? 4.5 : 2.0)) : 0
+            Image(systemName: systemName)
+                .scaleEffect(x: 1 + wave * (flame ? 0.035 : 0.025),
+                             y: 1 + wave * (flame ? 0.07 : 0.025), anchor: .bottom)
+                .rotationEffect(.degrees(wave * (flame ? 2 : 1)))
+                .offset(y: flame ? -abs(wave) * 0.6 : 0)
+        }
+        .onAppear { visible = true }
+        .onDisappear { visible = false }
+        .onScrollVisibilityChange(threshold: 0.01) { visible = $0 }
+        .accessibilityHidden(true)
+    }
+}
+
+
+private struct EditReplyView: View {
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var blurbStore: BlurbStore
+    let comment: BlurbComment
+    let post: BlurbPost
+    @State private var draft: String
+    @State private var saving = false
+    @State private var saveError: String?
+
+    init(comment: BlurbComment, post: BlurbPost) {
+        self.comment = comment
+        self.post = post
+        _draft = State(initialValue: comment.text)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                TextField("Your reply", text: $draft, axis: .vertical).lineLimit(3...10)
+                MentionSuggestions(text: $draft, names: blurbStore.mentionNames(in: post.groupID))
+                if let saveError { Text(saveError).foregroundStyle(.red) }
+            }
+            .navigationTitle("Edit reply")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }.disabled(saving)
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        saving = true
+                        Task {
+                            if await blurbStore.editComment(comment, on: post, text: draft) { dismiss() }
+                            else { saveError = blurbStore.errorMessage ?? "Could not save your reply." }
+                            saving = false
+                        }
+                    }
+                    .disabled(saving || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || draft.count > 1000)
+                }
+            }
+            .interactiveDismissDisabled(saving)
+        }
+    }
+}
+
+
+private struct OwnReplyActions: ViewModifier {
+    @EnvironmentObject private var auth: AuthManager
+    @EnvironmentObject private var blurbStore: BlurbStore
+    @State private var confirmingDelete = false
+    let comment: BlurbComment
+    let post: BlurbPost
+    func body(content: Content) -> some View {
+        content
+            .contentShape(Rectangle())
+            .highPriorityGesture(
+                LongPressGesture(minimumDuration: 0.5).onEnded { _ in
+                    if comment.authorID == auth.user?.uid { confirmingDelete = true }
+                }
+            )
+            .contextMenu {
+                if comment.authorID == auth.user?.uid {
+                    Button("Delete reply", systemImage: "trash", role: .destructive) { confirmingDelete = true }
+                }
+            }
+            .confirmationDialog("Delete your reply?", isPresented: $confirmingDelete, titleVisibility: .visible) {
+                Button("Delete reply", role: .destructive) {
+                    Task { await blurbStore.deleteComment(comment, on: post) }
+                }
+                Button("Cancel", role: .cancel) {}
+            }
+    }
+}
+
+private struct PostAnswerEditor: View {
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var blurbStore: BlurbStore
+    let post: BlurbPost
+    @State private var draft: String
+    @State private var saving = false
+    @State private var saveError: String?
+    init(post: BlurbPost) {
+        self.post = post
+        _draft = State(initialValue: post.answer)
+    }
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section { Text(post.prompt) }
+                Section("Your answer") {
+                    if post.pollOptions.isEmpty {
+                        TextField("Your answer", text: $draft, axis: .vertical).lineLimit(3...12)
+                    } else {
+                        Picker("Answer", selection: $draft) {
+                            ForEach(post.pollOptions, id: \.self) { Text($0).tag($0) }
+                        }
+                    }
+                    MentionSuggestions(text: $draft, names: blurbStore.mentionNames(in: post.groupID))
+                }
+                Text("Edit your text without changing the attached photo. Saving refreshes your timestamp and removes this answer's streak credit.")
+                    .font(.caption).foregroundStyle(.secondary)
+                if let saveError { Text(saveError).foregroundStyle(.red) }
+            }
+            .navigationTitle("Edit answer")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() }.disabled(saving) }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        saving = true
+                        Task {
+                            if await blurbStore.editPost(post, answer: draft) { dismiss() }
+                            else { saveError = blurbStore.errorMessage ?? "Couldn't save this answer." }
+                            saving = false
+                        }
+                    }
+                    .disabled(saving || (draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && post.imageURL == nil))
+                }
+            }
+            .interactiveDismissDisabled(saving)
+        }
+    }
 }

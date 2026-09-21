@@ -11,6 +11,7 @@ import SwiftUI
 final class AuthManager: ObservableObject {
     @Published private(set) var user: User?
     @Published private(set) var isLoading = true
+    @Published private(set) var isAuthenticating = false
     @Published var errorMessage: String?
 
     private var listener: AuthStateDidChangeListenerHandle?
@@ -18,6 +19,7 @@ final class AuthManager: ObservableObject {
 
     init() {
         listener = Auth.auth().addStateDidChangeListener { [weak self] _, user in
+            guard self?.isAuthenticating != true else { return }
             self?.user = user
             self?.isLoading = false
         }
@@ -30,6 +32,7 @@ final class AuthManager: ObservableObject {
     }
 
     func prepareAppleRequest(_ request: ASAuthorizationAppleIDRequest) {
+        errorMessage = nil
         let nonce = randomNonceString()
         currentNonce = nonce
         request.requestedScopes = [.fullName, .email]
@@ -59,13 +62,63 @@ final class AuthManager: ObservableObject {
             )
 
             Task {
+                guard !isAuthenticating else { return }
+                isAuthenticating = true
+                defer { finishAuthentication() }
                 do {
                     let result = try await Auth.auth().signIn(with: credential)
-                    try await createProfileIfNeeded(for: result.user, fullName: appleCredential.fullName)
+                    let name = PersonNameComponentsFormatter().string(from: appleCredential.fullName ?? PersonNameComponents())
+                    await prepareProfile(for: result.user, displayName: name)
                 } catch {
                     errorMessage = error.localizedDescription
                 }
             }
+        }
+    }
+
+    func signIn(email: String, password: String) async throws {
+        guard !isAuthenticating else { return }
+        isAuthenticating = true
+        errorMessage = nil
+        defer { finishAuthentication() }
+        let result = try await Auth.auth().signIn(
+            withEmail: email.trimmingCharacters(in: .whitespacesAndNewlines),
+            password: password
+        )
+        await prepareProfile(for: result.user)
+    }
+
+    func sendPasswordReset(email: String) async throws {
+        try await Auth.auth().sendPasswordReset(withEmail: email.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    func createAccount(email: String, password: String) async throws {
+        guard !isAuthenticating else { return }
+        isAuthenticating = true
+        errorMessage = nil
+        defer { finishAuthentication() }
+        let result = try await Auth.auth().createUser(
+            withEmail: email.trimmingCharacters(in: .whitespacesAndNewlines),
+            password: password
+        )
+        await prepareProfile(for: result.user)
+    }
+
+    private func finishAuthentication() {
+        // Publish the session only after profile setup so the signed-in UI doesn't
+        // start with a missing profile. Auth failures leave the welcome screen visible.
+        user = Auth.auth().currentUser
+        isLoading = false
+        isAuthenticating = false
+    }
+
+    private func prepareProfile(for user: User, displayName: String = "") async {
+        do {
+            try await createProfileIfNeeded(for: user, displayName: displayName)
+        } catch {
+            // Authentication already succeeded. Don't misreport a created account
+            // as a failed sign-in. Profile setup can be retried on the next login.
+            errorMessage = "You're signed in, but your profile couldn't be saved. You can update it from Profile or sign in again to retry. \(error.localizedDescription)"
         }
     }
 
@@ -134,16 +187,16 @@ final class AuthManager: ObservableObject {
             return true
         } catch {
             errorMessage = (error as NSError).code == AuthErrorCode.requiresRecentLogin.rawValue
-                ? "For security, sign out and sign in with Apple again before deleting your account."
+                ? "For security, sign out and sign in again before deleting your account."
                 : error.localizedDescription
             return false
         }
     }
 
-    private func createProfileIfNeeded(for user: User, fullName: PersonNameComponents?) async throws {
+    private func createProfileIfNeeded(for user: User, displayName: String) async throws {
         let profile = Firestore.firestore().collection("users").document(user.uid)
         let snapshot = try await profile.getDocument()
-        let name = PersonNameComponentsFormatter().string(from: fullName ?? PersonNameComponents())
+        let name = displayName
         if !name.isEmpty, user.displayName != name {
             let changeRequest = user.createProfileChangeRequest()
             changeRequest.displayName = name
@@ -162,6 +215,7 @@ final class AuthManager: ObservableObject {
             values["displayName"] = user.displayName ?? "Blurb friend"
         }
         if !snapshot.exists {
+            values["profileSetupCompleted"] = false
             values["createdAt"] = FieldValue.serverTimestamp()
             if let email = user.email {
                 values["email"] = email

@@ -1,4 +1,4 @@
-const {onDocumentCreated} = require("firebase-functions/v2/firestore");
+const {onDocumentCreated, onDocumentWritten} = require("firebase-functions/v2/firestore");
 const {onSchedule} = require("firebase-functions/v2/scheduler");
 const {initializeApp} = require("firebase-admin/app");
 const {getFirestore, FieldValue} = require("firebase-admin/firestore");
@@ -6,53 +6,66 @@ const {getMessaging} = require("firebase-admin/messaging");
 
 initializeApp();
 
-exports.notifyAnswerReply = onDocumentCreated(
-    "posts/{postID}/comments/{commentID}",
-    async (event) => {
-      const comment = event.data?.data();
-      if (!comment) return;
+const {notificationRecipients} = require("./mentions");
 
-      const database = getFirestore();
-      const postSnapshot = await database.doc(`posts/${event.params.postID}`).get();
-      const post = postSnapshot.data();
-      if (!post || post.authorID === comment.authorID) return;
-
-      const userReference = database.doc(`users/${post.authorID}`);
-      const userSnapshot = await userReference.get();
-      const tokens = userSnapshot.data()?.fcmTokens ?? [];
-      if (tokens.length === 0) return;
-
-      const reply = String(comment.text ?? "").trim();
-      const body = reply.length > 120 ? `${reply.slice(0, 117)}…` : reply;
+async function notifyGroupActivity({eventID, postID, post, senderID, text, previousText = "", commentID}) {
+  if (!post || post.isSample || !post.groupID || !senderID) return;
+  const database = getFirestore();
+  const group = (await database.doc(`groups/${post.groupID}`).get()).data();
+  const memberIDs = [...new Set(group?.memberIDs ?? [])];
+  if (!memberIDs.includes(senderID)) return;
+  const snapshots = await Promise.all(memberIDs.map((id) => database.doc(`users/${id}`).get()));
+  const members = snapshots.filter((snapshot) => snapshot.exists)
+      .map((snapshot) => ({...snapshot.data(), id: snapshot.id}));
+  const sender = members.find((member) => member.id === senderID);
+  const recipients = notificationRecipients({text, members, senderID, previousText,
+    postAuthorID: commentID ? post.authorID : undefined});
+  for (const [userID, type] of recipients) {
+    const member = members.find((entry) => entry.id === userID);
+    const tokens = [...new Set(member?.fcmTokens ?? [])].filter((token) => typeof token === "string" && token);
+    if (!tokens.length) continue;
+    const receiptID = Buffer.from(`${eventID}:${userID}`).toString("base64url");
+    const receipt = database.collection("notificationDeliveries").doc(receiptID);
+    const claimed = await database.runTransaction(async (transaction) => {
+      if ((await transaction.get(receipt)).exists) return false;
+      transaction.create(receipt, {createdAt: FieldValue.serverTimestamp()});
+      return true;
+    });
+    if (!claimed) continue;
+    // At-most-once claim avoids duplicate pushes from duplicate Firestore events.
+    // Keep answer text out of notifications so the answer-first gate is preserved.
+    for (let offset = 0; offset < tokens.length; offset += 500) {
+      const batch = tokens.slice(offset, offset + 500);
       const response = await getMessaging().sendEachForMulticast({
-        tokens,
+        tokens: batch,
         notification: {
-          title: `${comment.authorName ?? "Someone"} replied to your answer`,
-          body,
+          title: type === "mention" ? `${sender?.displayName ?? "Someone"} mentioned you` : `${sender?.displayName ?? "Someone"} replied to your answer`,
+          body: type === "mention" ? `You were mentioned in ${commentID ? "a reply" : "an answer"} in ${group.name ?? "your group"}.` : `Open ${group.name ?? "your group"} to read the reply.`,
         },
-        data: {
-          postID: event.params.postID,
-          type: "answerReply",
-        },
-        apns: {
-          payload: {aps: {sound: "default"}},
-        },
+        data: {postID, groupID: post.groupID, type, ...(commentID ? {commentID} : {})},
+        apns: {payload: {aps: {sound: "default"}}},
       });
+      const invalid = batch.filter((_, index) => ["messaging/invalid-registration-token", "messaging/registration-token-not-registered"].includes(response.responses[index].error?.code));
+      if (invalid.length) await database.doc(`users/${userID}`).update({fcmTokens: FieldValue.arrayRemove(...invalid)});
+    }
+  }
+}
 
-      const invalidTokens = [];
-      response.responses.forEach((result, index) => {
-        if (!result.success && [
-          "messaging/invalid-registration-token",
-          "messaging/registration-token-not-registered",
-        ].includes(result.error?.code)) {
-          invalidTokens.push(tokens[index]);
-        }
-      });
-      if (invalidTokens.length > 0) {
-        await userReference.update({fcmTokens: FieldValue.arrayRemove(...invalidTokens)});
-      }
-    },
-);
+exports.notifyAnswerReply = onDocumentCreated("posts/{postID}/comments/{commentID}", async (event) => {
+  const comment = event.data?.data();
+  if (!comment) return;
+  const post = (await getFirestore().doc(`posts/${event.params.postID}`).get()).data();
+  await notifyGroupActivity({eventID: event.id, postID: event.params.postID, post,
+    senderID: comment.authorID, text: comment.text, commentID: event.params.commentID});
+});
+
+exports.notifyAnswerMentions = onDocumentWritten("posts/{postID}", async (event) => {
+  const post = event.data?.after.data();
+  const previous = event.data?.before.data();
+  if (!post || previous?.answer === post.answer) return;
+  await notifyGroupActivity({eventID: event.id, postID: event.params.postID, post,
+    senderID: post.authorID, text: post.answer, previousText: previous?.answer ?? ""});
+});
 
 exports.generateMonthlyNewsletters = onSchedule(
     {schedule: "0 8 3 * *", timeZone: "America/Los_Angeles"},

@@ -4,6 +4,7 @@ import SwiftUI
 struct WelcomeView: View {
     @Environment(\.colorScheme) private var colorScheme
     @EnvironmentObject private var auth: AuthManager
+    @State private var showingEmailSignIn = false
 
     var body: some View {
         ZStack {
@@ -12,56 +13,78 @@ struct WelcomeView: View {
                 : Color(red: 0.965, green: 0.95, blue: 0.88))
                 .ignoresSafeArea()
 
-            VStack(spacing: 20) {
-                Text("THE DAILY BLURB")
-                    .font(.caption.weight(.black))
-                    .tracking(2.4)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 7)
-                    .background(Color(red: 1, green: 0.78, blue: 0.02))
-                    .foregroundStyle(.black)
+            ScrollView {
+                VStack(spacing: 20) {
+                    Text("THE DAILY BLURB")
+                        .font(.caption.weight(.black))
+                        .tracking(2.4)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 7)
+                        .background(Color(red: 1, green: 0.78, blue: 0.02))
+                        .foregroundStyle(.black)
 
-                Text("A question a day,\nfor your people.")
-                    .font(.system(size: 40, weight: .bold, design: .serif))
-                    .multilineTextAlignment(.center)
-                    .foregroundStyle(.primary)
-                    .padding(.top, 48)
+                    Text("A question a day,\nfor your people.")
+                        .font(.system(size: 40, weight: .bold, design: .serif))
+                        .multilineTextAlignment(.center)
+                        .foregroundStyle(.primary)
+                        .padding(.top, 48)
 
-                Text("Daily Blurb keeps your closest groups connected through the little things worth sharing.")
-                    .font(.body)
-                    .multilineTextAlignment(.center)
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 36)
-
-                ZStack {
-                    Color.black
-                    Image(systemName: "text.bubble.fill")
-                        .font(.system(size: 64, weight: .semibold))
-                        .foregroundStyle(Color(red: 1, green: 0.78, blue: 0.02))
-                }
-                .frame(maxWidth: .infinity, minHeight: 245)
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                .padding(.horizontal, 22)
-
-                Spacer(minLength: 12)
-
-                VStack(spacing: 12) {
-                    SignInWithAppleButton(.continue) { request in
-                        auth.prepareAppleRequest(request)
-                    } onCompletion: { result in
-                        auth.completeAppleSignIn(result)
-                    }
-                    .signInWithAppleButtonStyle(colorScheme == .dark ? .white : .black)
-                    .frame(height: 52)
-                    .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
-
-                    Text("Your groups stay private. Your answers stay yours.")
-                        .font(.caption)
+                    Text("Daily Blurb keeps your closest groups connected through the little things worth sharing.")
+                        .font(.body)
+                        .multilineTextAlignment(.center)
                         .foregroundStyle(.secondary)
+                        .padding(.horizontal, 36)
+
+                    ZStack {
+                        Color.black
+                        Image(systemName: "text.bubble.fill")
+                            .font(.system(size: 64, weight: .semibold))
+                            .foregroundStyle(Color(red: 1, green: 0.78, blue: 0.02))
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 245)
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .padding(.horizontal, 22)
+
+                    Spacer(minLength: 12)
+
+                    VStack(spacing: 12) {
+                        SignInWithAppleButton(.continue) { request in
+                            auth.prepareAppleRequest(request)
+                        } onCompletion: { result in
+                            auth.completeAppleSignIn(result)
+                        }
+                        .signInWithAppleButtonStyle(colorScheme == .dark ? .white : .black)
+                        .frame(height: 52)
+                        .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
+                        .disabled(auth.isAuthenticating)
+
+                        Button("Continue with email") {
+                            showingEmailSignIn = true
+                        }
+                        .font(.headline)
+                        .frame(maxWidth: .infinity, minHeight: 48)
+                        .foregroundStyle(.primary)
+                        .overlay { RoundedRectangle(cornerRadius: 15).stroke(.primary.opacity(0.4)) }
+                        .disabled(auth.isAuthenticating)
+                        .accessibilityIdentifier("continueWithEmail")
+
+                        if auth.isAuthenticating {
+                            ProgressView("Signing in…")
+                        }
+
+                        Text("Your groups stay private. Your answers stay yours.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.horizontal, 28)
+                    .padding(.bottom, 34)
                 }
-                .padding(.horizontal, 28)
-                .padding(.bottom, 34)
+                .padding(.top, 16)
             }
+        }
+        .sheet(isPresented: $showingEmailSignIn) {
+            EmailAuthView()
+                .environmentObject(auth)
         }
         .alert("Couldn’t sign in", isPresented: Binding(
             get: { auth.errorMessage != nil },

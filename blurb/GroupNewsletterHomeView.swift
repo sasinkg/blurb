@@ -3,6 +3,21 @@ import SwiftUI
 struct GroupNewsletterHomeView: View {
     @EnvironmentObject private var blurbStore: BlurbStore
     let group: BlurbGroup
+    @State private var promptClock = Date.now
+    @AppStorage("birthdayQuestionsEnabled") private var birthdayQuestionsEnabled = false
+    @AppStorage("birthdayQuestion") private var birthdayQuestion = ""
+    @AppStorage("birthdayTimestamp") private var birthdayTimestamp = Date.now.timeIntervalSince1970
+
+    private var todayPromptID: String {
+        if blurbStore.canAddReviewExamples {
+            return ExampleGroupContent.prompt(for: promptClock).id
+        }
+        return QuestionBank.prompt(
+            for: promptClock,
+            birthdayPrompt: birthdayQuestion,
+            birthday: birthdayQuestionsEnabled ? Date(timeIntervalSince1970: birthdayTimestamp) : nil
+        ).id
+    }
 
     private var calendar: Calendar {
         var calendar = Calendar(identifier: .gregorian)
@@ -12,7 +27,9 @@ struct GroupNewsletterHomeView: View {
 
     private var currentPosts: [BlurbPost] {
         blurbStore.posts.filter {
-            $0.groupID == group.id && calendar.isDate($0.createdAt, equalTo: .now, toGranularity: .month)
+            $0.groupID == group.id
+                && calendar.isDate($0.createdAt, equalTo: .now, toGranularity: .month)
+                && blurbStore.hasAnswered(promptID: $0.isSample ? todayPromptID : $0.promptID, in: group.id)
         }
     }
 
@@ -24,8 +41,8 @@ struct GroupNewsletterHomeView: View {
                     id: $0.id,
                     authorName: $0.authorName,
                     answer: $0.answer,
-                    prompt: $0.prompt,
-                    promptID: $0.promptID,
+                    prompt: $0.isSample ? ExampleGroupContent.question : $0.prompt,
+                    promptID: $0.isSample ? "review-example-samples" : $0.promptID,
                     imageURL: $0.imageURL,
                     createdAt: $0.createdAt
                 )
@@ -76,16 +93,12 @@ struct GroupNewsletterHomeView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 8))
 
-                    NavigationLink {
-                        ArchivedNewsletterView(edition: currentEdition, isInProgress: true)
-                    } label: {
-                        newsletterCard(
-                            title: currentEdition.monthLabel,
-                            subtitle: "Preview in progress · not generated yet",
-                            icon: "newspaper.fill"
-                        )
-                    }
-                    .buttonStyle(.plain)
+                    newsletterCard(
+                        title: currentEdition.monthLabel,
+                        subtitle: "Locked until the finished edition is generated",
+                        icon: "lock.fill"
+                    )
+                    .accessibilityLabel("\(currentEdition.monthLabel) newsletter locked. Not generated yet.")
 
                     NavigationLink {
                         GroupNewsletterArchiveView(group: group, editions: archivedEditions)
@@ -100,6 +113,12 @@ struct GroupNewsletterHomeView: View {
 
                 }
                 .padding()
+            }
+        }
+        .task {
+            while !Task.isCancelled {
+                promptClock = .now
+                try? await Task.sleep(for: .seconds(60))
             }
         }
         .navigationTitle("")
