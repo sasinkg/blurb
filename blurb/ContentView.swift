@@ -2238,7 +2238,7 @@ struct SettingsView: View {
                                 .onChange(of: dailyReminderEnabled) { _, enabled in
                                     updateDailyReminder(enabled: enabled)
                                 }
-                            Text("Get a reminder every day at 7:00 PM.")
+                            Text("Get reminders at 10:00 AM and 7:00 PM, plus up to two nudges when friends post if you haven’t answered.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                             Toggle("Weekly Trivia", isOn: $weeklyTriviaEnabled)

@@ -11,6 +11,7 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate, Mes
     private let center = UNUserNotificationCenter.current()
     private let dailyReminderIdentifier = "daily-blurb-reminder"
     private let answeredReminderKeyPrefix = "daily-blurb-answered-reminder"
+    private let reminderTimes = [(slot: "morning", hour: 10), (slot: "evening", hour: 19)]
 
     private override init() {
         super.init()
@@ -37,6 +38,7 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate, Mes
         }
 
         try await scheduleDailyReminder()
+        await enableRemoteDailyReminders()
     }
 
     func restoreDailyReminderIfAuthorized() async -> Bool {
@@ -45,6 +47,7 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate, Mes
         case .authorized, .provisional, .ephemeral:
             do {
                 try await scheduleDailyReminder()
+                await enableRemoteDailyReminders()
                 return true
             } catch {
                 return false
@@ -55,18 +58,26 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate, Mes
     }
 
     func disableDailyReminder() {
-        let identifiers = reminderIdentifiersForNextDays(45) + [dailyReminderIdentifier]
+        let identifiers = reminderIdentifiersForNextDays(45) + legacyReminderIdentifiersForNextDays(45) + [dailyReminderIdentifier]
         center.removePendingNotificationRequests(withIdentifiers: identifiers)
         center.removeDeliveredNotifications(withIdentifiers: identifiers)
+        Task {
+            await setDailyReminderPreference(false)
+            if !UserDefaults.standard.bool(forKey: "replyNotificationsEnabled"),
+               let userID = Auth.auth().currentUser?.uid {
+                await removeReplyToken(for: userID)
+            }
+        }
     }
 
     func markAnsweredToday() {
-        let identifier = reminderIdentifier(for: .now)
+        let identifier = legacyReminderIdentifier(for: .now)
         if let userID = Auth.auth().currentUser?.uid {
             UserDefaults.standard.set(identifier, forKey: answeredReminderKey(for: userID))
         }
-        center.removePendingNotificationRequests(withIdentifiers: [identifier, dailyReminderIdentifier])
-        center.removeDeliveredNotifications(withIdentifiers: [identifier, dailyReminderIdentifier])
+        let identifiers = reminderTimes.map { reminderIdentifier(for: .now, slot: $0.slot) } + [identifier, dailyReminderIdentifier]
+        center.removePendingNotificationRequests(withIdentifiers: identifiers)
+        center.removeDeliveredNotifications(withIdentifiers: identifiers)
     }
 
     func enableReplyNotifications() async throws {
@@ -89,6 +100,7 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate, Mes
         if let token = try? await Messaging.messaging().token() {
             await save(token: token)
         }
+        await setReplyNotificationPreference(true)
     }
 
     func restoreReplyNotificationsIfAuthorized() async -> Bool {
@@ -105,7 +117,9 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate, Mes
     }
 
     func disableReplyNotifications() async {
-        guard let userID = Auth.auth().currentUser?.uid else { return }
+        await setReplyNotificationPreference(false)
+        guard !UserDefaults.standard.bool(forKey: "dailyReminderEnabled"),
+              let userID = Auth.auth().currentUser?.uid else { return }
         await removeReplyToken(for: userID)
     }
 
@@ -122,7 +136,8 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate, Mes
     }
 
     private func save(token: String) async {
-        guard UserDefaults.standard.bool(forKey: "replyNotificationsEnabled"),
+        guard (UserDefaults.standard.bool(forKey: "replyNotificationsEnabled") ||
+               UserDefaults.standard.bool(forKey: "dailyReminderEnabled")),
               let userID = Auth.auth().currentUser?.uid else { return }
         try? await Firestore.firestore().collection("users").document(userID).setData([
             "fcmTokens": FieldValue.arrayUnion([token])
@@ -130,11 +145,6 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate, Mes
     }
 
     private func scheduleDailyReminder() async throws {
-        let content = UNMutableNotificationContent()
-        content.title = "Daily Blurb"
-        content.body = "Make sure you answer today’s question!"
-        content.sound = .default
-
         let calendar = Calendar.current
         let now = Date.now
         let answeredIdentifier: String?
@@ -143,40 +153,83 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate, Mes
         } else {
             answeredIdentifier = nil
         }
-        let oldIdentifiers = reminderIdentifiersForNextDays(45) + [dailyReminderIdentifier]
+        let oldIdentifiers = reminderIdentifiersForNextDays(45) + legacyReminderIdentifiersForNextDays(45) + [dailyReminderIdentifier]
         center.removePendingNotificationRequests(withIdentifiers: oldIdentifiers)
 
         for offset in 0..<30 {
             guard let day = calendar.date(byAdding: .day, value: offset, to: now),
-                  let fireDate = calendar.date(bySettingHour: 19, minute: 0, second: 0, of: day),
-                  fireDate > now else { continue }
-            let identifier = reminderIdentifier(for: fireDate)
-            guard identifier != answeredIdentifier else { continue }
-            let request = UNNotificationRequest(
-                identifier: identifier,
-                content: content,
-                trigger: UNCalendarNotificationTrigger(
-                    dateMatching: calendar.dateComponents([.year, .month, .day, .hour, .minute], from: fireDate),
-                    repeats: false
+                  legacyReminderIdentifier(for: day) != answeredIdentifier else { continue }
+            for reminder in reminderTimes {
+                guard let fireDate = calendar.date(bySettingHour: reminder.hour, minute: 0, second: 0, of: day),
+                      fireDate > now else { continue }
+                let content = UNMutableNotificationContent()
+                content.title = reminder.slot == "morning" ? "Today’s Blurb is ready" : "Don’t forget today’s Blurb"
+                content.body = reminder.slot == "morning"
+                    ? "Start the conversation with your answer."
+                    : "There’s still time to answer today’s question."
+                content.sound = .default
+                let request = UNNotificationRequest(
+                    identifier: reminderIdentifier(for: fireDate, slot: reminder.slot),
+                    content: content,
+                    trigger: UNCalendarNotificationTrigger(
+                        dateMatching: calendar.dateComponents([.year, .month, .day, .hour, .minute], from: fireDate),
+                        repeats: false
+                    )
                 )
-            )
-            try await center.add(request)
+                try await center.add(request)
+            }
         }
     }
 
     private func reminderIdentifiersForNextDays(_ count: Int) -> [String] {
         let calendar = Calendar.current
-        return (0..<count).compactMap { offset in
-            calendar.date(byAdding: .day, value: offset, to: .now).map(reminderIdentifier)
+        return (0..<count).flatMap { offset -> [String] in
+            guard let day = calendar.date(byAdding: .day, value: offset, to: .now) else { return [] }
+            return reminderTimes.map { reminderIdentifier(for: day, slot: $0.slot) }
         }
     }
 
-    private func reminderIdentifier(for date: Date) -> String {
+    private func legacyReminderIdentifiersForNextDays(_ count: Int) -> [String] {
+        let calendar = Calendar.current
+        return (0..<count).compactMap { offset in
+            calendar.date(byAdding: .day, value: offset, to: .now).map(legacyReminderIdentifier)
+        }
+    }
+
+    private func reminderIdentifier(for date: Date, slot: String) -> String {
+        "\(legacyReminderIdentifier(for: date))-\(slot)"
+    }
+
+    private func legacyReminderIdentifier(for date: Date) -> String {
         let formatter = DateFormatter()
         formatter.calendar = Calendar.current
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "yyyy-MM-dd"
         return "\(dailyReminderIdentifier)-\(formatter.string(from: date))"
+    }
+
+    private func enableRemoteDailyReminders() async {
+        await setDailyReminderPreference(true)
+        await MainActor.run {
+            UIApplication.shared.registerForRemoteNotifications()
+        }
+        if let token = try? await Messaging.messaging().token() {
+            await save(token: token)
+        }
+    }
+
+    private func setDailyReminderPreference(_ enabled: Bool) async {
+        guard let userID = Auth.auth().currentUser?.uid else { return }
+        try? await Firestore.firestore().collection("users").document(userID).updateData([
+            "notificationPreferences.dailyReminders": enabled
+        ])
+    }
+
+    private func setReplyNotificationPreference(_ enabled: Bool) async {
+        guard let userID = Auth.auth().currentUser?.uid else { return }
+        try? await Firestore.firestore().collection("users").document(userID).updateData([
+            "notificationPreferences.replyNotifications": enabled
+        ])
     }
 
     private func answeredReminderKey(for userID: String) -> String {

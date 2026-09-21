@@ -8,6 +8,7 @@ const {getMessaging} = require("firebase-admin/messaging");
 initializeApp();
 
 const {notificationRecipients} = require("./mentions");
+const {localDateKey, unansweredMemberIDs} = require("./socialNudges");
 const {
   buildSelection,
   photoMonthKey,
@@ -78,6 +79,7 @@ async function notifyGroupActivity({eventID, postID, post, senderID, text, previ
     postAuthorID: commentID ? post.authorID : undefined});
   for (const [userID, type] of recipients) {
     const member = members.find((entry) => entry.id === userID);
+    if (member?.notificationPreferences?.replyNotifications !== true) continue;
     const tokens = [...new Set(member?.fcmTokens ?? [])].filter((token) => typeof token === "string" && token);
     if (!tokens.length) continue;
     const receiptID = Buffer.from(`${eventID}:${userID}`).toString("base64url");
@@ -121,6 +123,70 @@ exports.notifyAnswerMentions = onDocumentWritten("posts/{postID}", async (event)
   if (!post || previous?.answer === post.answer) return;
   await notifyGroupActivity({eventID: event.id, postID: event.params.postID, post,
     senderID: post.authorID, text: post.answer, previousText: previous?.answer ?? ""});
+});
+
+exports.notifyUnansweredGroupMembers = onDocumentCreated("posts/{postID}", async (event) => {
+  const post = event.data?.data();
+  if (!post || post.isSample || !post.groupID || !post.authorID) return;
+
+  const database = getFirestore();
+  const groupSnapshot = await database.doc(`groups/${post.groupID}`).get();
+  const group = groupSnapshot.data();
+  const memberIDs = group?.memberIDs ?? [];
+  if (!groupSnapshot.exists || !memberIDs.includes(post.authorID)) return;
+
+  const today = localDateKey(new Date());
+  const postsSnapshot = await database.collection("posts").where("groupID", "==", post.groupID).get();
+  const answeredAuthorIDs = postsSnapshot.docs
+      .filter((document) => {
+        const createdAt = document.data().createdAt?.toDate?.();
+        return createdAt && localDateKey(createdAt) === today;
+      })
+      .map((document) => document.data().authorID)
+      .filter(Boolean);
+  const recipientIDs = unansweredMemberIDs({memberIDs, senderID: post.authorID, answeredAuthorIDs});
+  const sender = (await database.doc(`users/${post.authorID}`).get()).data();
+
+  for (const userID of recipientIDs) {
+    const userReference = database.doc(`users/${userID}`);
+    const user = (await userReference.get()).data();
+    if (user?.notificationPreferences?.dailyReminders !== true) continue;
+    const tokens = [...new Set(user?.fcmTokens ?? [])].filter((token) => typeof token === "string" && token);
+    if (!tokens.length) continue;
+
+    const counter = database.doc(`notificationDailyCounts/${today}_${userID}`);
+    const receipt = database.doc(`notificationDeliveries/social-${event.id}-${userID}`);
+    const claimed = await database.runTransaction(async (transaction) => {
+      const [counterSnapshot, receiptSnapshot] = await Promise.all([
+        transaction.get(counter), transaction.get(receipt),
+      ]);
+      if (receiptSnapshot.exists || (counterSnapshot.data()?.socialNudgeCount ?? 0) >= 2) return false;
+      transaction.set(counter, {
+        userID,
+        dateKey: today,
+        socialNudgeCount: FieldValue.increment(1),
+        updatedAt: FieldValue.serverTimestamp(),
+      }, {merge: true});
+      transaction.create(receipt, {createdAt: FieldValue.serverTimestamp()});
+      return true;
+    });
+    if (!claimed) continue;
+
+    for (let offset = 0; offset < tokens.length; offset += 500) {
+      const batch = tokens.slice(offset, offset + 500);
+      const response = await getMessaging().sendEachForMulticast({
+        tokens: batch,
+        notification: {
+          title: `${sender?.displayName ?? post.authorName ?? "A friend"} posted in ${group.name ?? "your group"}`,
+          body: "You haven’t posted yet—share your Blurb and join the conversation.",
+        },
+        data: {postID: event.params.postID, groupID: post.groupID, type: "answerNudge"},
+        apns: {payload: {aps: {sound: "default"}}},
+      });
+      const invalid = batch.filter((_, index) => ["messaging/invalid-registration-token", "messaging/registration-token-not-registered"].includes(response.responses[index].error?.code));
+      if (invalid.length) await userReference.update({fcmTokens: FieldValue.arrayRemove(...invalid)});
+    }
+  }
 });
 
 exports.generateMonthlyNewsletters = onSchedule(
