@@ -1,8 +1,10 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct MonthlyWrappedView: View {
     let edition: NewsletterEdition
     @State private var page = 0
+    @State private var shareCard: WrappedShareImage?
 
     private var slides: [WrappedSlide] {
         var result: [WrappedSlide] = [.intro]
@@ -41,12 +43,28 @@ struct MonthlyWrappedView: View {
         .foregroundStyle(.white)
         .navigationTitle(edition.monthLabel)
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            if let shareCard {
+                ShareLink(item: shareCard, preview: SharePreview("\(edition.monthLabel) Wrapped", image: Image(uiImage: shareCard.image))) {
+                    Image(systemName: "square.and.arrow.up")
+                }
+                .accessibilityLabel("Share Monthly Wrapped")
+            }
+        }
+        .task { renderShareCard() }
         .accessibilityAction(named: "Previous") { move(-1) }
         .accessibilityAction(named: "Next") { move(1) }
     }
 
     private func move(_ offset: Int) {
         withAnimation(.easeInOut(duration: 0.2)) { page = min(max(page + offset, 0), slides.count - 1) }
+    }
+
+    @MainActor private func renderShareCard() {
+        let card = WrappedShareCard(edition: edition).frame(width: 1080, height: 1350)
+        let renderer = ImageRenderer(content: card)
+        renderer.scale = 1
+        if let image = renderer.uiImage { shareCard = WrappedShareImage(image: image) }
     }
 
     @ViewBuilder private func slide(_ slide: WrappedSlide) -> some View {
@@ -89,6 +107,43 @@ struct MonthlyWrappedView: View {
     private func stat(_ value: Int, _ label: String) -> some View {
         VStack { Text("\(value)").font(.system(size: 48, weight: .black)); Text(label.uppercased()).font(.caption.bold()) }
             .frame(maxWidth: .infinity).padding().background(.white.opacity(0.1), in: RoundedRectangle(cornerRadius: 18))
+    }
+}
+
+private struct WrappedShareCard: View {
+    let edition: NewsletterEdition
+    var body: some View {
+        ZStack {
+            LinearGradient(colors: [.black, Color(red: 0.25, green: 0.16, blue: 0.01)], startPoint: .topLeading, endPoint: .bottomTrailing)
+            VStack(alignment: .leading, spacing: 46) {
+                HStack { Text("BLURB").tracking(8); Spacer(); Image(systemName: "sparkles") }
+                    .font(.system(size: 32, weight: .black)).foregroundStyle(.yellow)
+                Spacer()
+                Text(edition.monthLabel.uppercased()).font(.system(size: 86, weight: .black, design: .serif))
+                Text("\(edition.groupName)’s Monthly Wrapped").font(.system(size: 40, weight: .semibold))
+                HStack(spacing: 24) {
+                    shareStat(edition.stats.answerCount, "ANSWERS")
+                    shareStat(edition.stats.questionCount, "QUESTIONS")
+                    shareStat(edition.stats.photoCount, "PHOTOS")
+                }
+                Spacer()
+                Text("A month looks different through everyone’s eyes.").font(.system(size: 30, design: .serif)).italic()
+            }.padding(76)
+        }.foregroundStyle(.white)
+    }
+    private func shareStat(_ value: Int, _ title: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) { Text("\(value)").font(.system(size: 64, weight: .black)); Text(title).font(.system(size: 20, weight: .bold)).tracking(2) }
+            .frame(maxWidth: .infinity, alignment: .leading).padding(24).background(.white.opacity(0.1), in: RoundedRectangle(cornerRadius: 20))
+    }
+}
+
+private struct WrappedShareImage: Transferable {
+    let image: UIImage
+    static var transferRepresentation: some TransferRepresentation {
+        DataRepresentation(exportedContentType: .png) { item in
+            guard let data = item.image.pngData() else { throw CocoaError(.fileWriteUnknown) }
+            return data
+        }
     }
 }
 
