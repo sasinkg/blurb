@@ -156,14 +156,7 @@ struct MonthlyWrappedView: View {
                     }
                 }
             case .final:
-                sectionLabel("FINAL EDITION")
-                Text("THE \(edition.groupName.uppercased()) TIMES").font(.system(size: 34, weight: .black, design: .serif)).multilineTextAlignment(.center)
-                Rectangle().frame(height: 5)
-                Text("A MONTH TO REMEMBER").font(.system(size: 40, weight: .black, design: .serif)).multilineTextAlignment(.center)
-                Text("\(edition.stats.answerCount) answers across \(edition.stats.questionCount) questions tell the story of \(edition.monthLabel).").font(.system(.title3, design: .serif)).multilineTextAlignment(.center)
-                HStack { stat(edition.stats.participatingMemberCount, "people"); stat(edition.stats.photoCount, "photos") }
-                if let winner = edition.mostPointsWinner { Text("POINTS LEADER: \(winner.uppercased())").font(.caption.weight(.black)).tracking(1).padding(10).overlay { Rectangle().stroke(.black) } }
-                Text("A month looks different through everyone’s eyes.").font(.system(.body, design: .serif)).italic().multilineTextAlignment(.center)
+                WrappedNewspaperPage(edition: edition, accent: accent)
             }
             Spacer()
             Rectangle().frame(height: 1)
@@ -178,6 +171,78 @@ struct MonthlyWrappedView: View {
     private func stat(_ value: Int, _ label: String) -> some View {
         VStack { Text("\(value)").font(.system(size: 48, weight: .black)); Text(label.uppercased()).font(.caption.bold()) }
             .frame(maxWidth: .infinity).padding().background(Color.white.opacity(0.38)).overlay { Rectangle().stroke(.black, lineWidth: 1.5) }
+    }
+}
+
+private struct WrappedNewspaperPage: View {
+    let edition: NewsletterEdition
+    let accent: Color
+    private var questions: [(String, [NewsletterEntry])] {
+        Dictionary(grouping: edition.entries.filter { $0.imageURL == nil && !$0.answer.isEmpty }, by: \.promptID)
+            .values.compactMap { entries in entries.first.map { ($0.prompt, entries.sorted { $0.authorName < $1.authorName }) } }
+    }
+    private var photoGroups: [(String, [NewsletterEntry])] {
+        Dictionary(grouping: edition.entries.filter { $0.imageURL != nil }, by: \.promptID)
+            .values.compactMap { entries in entries.first.map { ($0.prompt, entries.sorted { $0.authorName < $1.authorName }) } }
+    }
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                Text("FINAL EDITION").font(.caption.weight(.black)).tracking(2).padding(7).background(accent)
+                Text("THE \(edition.groupName.uppercased()) TIMES").font(.system(size: 31, weight: .black, design: .serif)).frame(maxWidth: .infinity)
+                Rectangle().frame(height: 5)
+                HStack {
+                    newspaperStat(edition.stats.answerCount, "ANSWERS")
+                    newspaperStat(edition.stats.questionCount, "QUESTIONS")
+                    newspaperStat(edition.stats.photoCount, "PHOTOS")
+                }
+                if edition.mostAnswersWinner != nil || edition.mostPointsWinner != nil {
+                    VStack(alignment: .leading, spacing: 7) {
+                        Text("MONTHLY WINNERS").font(.caption.weight(.black)).tracking(1).padding(5).background(accent)
+                        if let winner = edition.mostAnswersWinner { Text("Most answers — **\(winner)**") }
+                        if let winner = edition.mostPointsWinner { Text("Points leader — **\(winner)**") }
+                    }.font(.system(.caption, design: .serif)).padding(12).overlay { Rectangle().stroke(.black, lineWidth: 1.5) }
+                }
+                ForEach(Array(questions.enumerated()), id: \.offset) { index, question in
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("\(String(format: "%02d", index + 1)) · THE MONTH IN WORDS").font(.system(size: 9, weight: .black)).tracking(1).foregroundStyle(.secondary)
+                        Text(question.0).font(.system(size: 21, weight: .bold, design: .serif))
+                        ForEach(question.1) { entry in
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(entry.authorName.uppercased()).font(.system(size: 8, weight: .black)).tracking(0.8)
+                                Text(entry.answer).font(.system(.caption, design: .serif))
+                            }
+                        }
+                    }.padding(.bottom, 14).overlay(alignment: .bottom) { Rectangle().frame(height: 1) }
+                }
+                ForEach(Array(photoGroups.enumerated()), id: \.offset) { _, group in
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text(group.0.uppercased()).font(.caption.weight(.black)).tracking(1).padding(5).background(accent)
+                        LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
+                            ForEach(group.1) { entry in
+                                VStack(alignment: .leading, spacing: 4) {
+                                    if entry.imageURL?.hasPrefix("demo://") == true {
+                                        Rectangle().fill(.black.opacity(0.06)).aspectRatio(4.0 / 3.0, contentMode: .fit)
+                                            .overlay { Image(systemName: entry.imageURL?.contains("food") == true ? "fork.knife" : "person.crop.rectangle.fill") }
+                                    } else {
+                                        AsyncImage(url: URL(string: entry.imageURL ?? "")) { $0.resizable().scaledToFill() } placeholder: { Rectangle().fill(.quaternary) }
+                                            .aspectRatio(4.0 / 3.0, contentMode: .fit).clipped()
+                                    }
+                                    Text(entry.answer).font(.system(size: 9, weight: .bold, design: .serif))
+                                    Text(entry.authorName.uppercased()).font(.system(size: 7, weight: .black))
+                                }.overlay { Rectangle().stroke(.black, lineWidth: 1) }
+                            }
+                        }
+                    }
+                }
+                Rectangle().frame(height: 4)
+                Text("A month looks different through everyone’s eyes.").font(.system(.body, design: .serif)).italic().frame(maxWidth: .infinity)
+            }.padding(.vertical, 6)
+        }
+    }
+    private func newspaperStat(_ value: Int, _ label: String) -> some View {
+        VStack { Text("\(value)").font(.title2.bold()); Text(label).font(.system(size: 7, weight: .black)) }
+            .frame(maxWidth: .infinity).padding(8).overlay { Rectangle().stroke(.black) }
     }
 }
 
