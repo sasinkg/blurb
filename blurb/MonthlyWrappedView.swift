@@ -12,6 +12,8 @@ struct MonthlyWrappedView: View {
         var result: [WrappedSlide] = [.intro]
         let stats = edition.stats
         if stats.answerCount > 0 { result.append(.stats) }
+        if let winner = edition.mostAnswersWinner { result.append(.winner("Most questions answered", winner, "checkmark.circle.fill")) }
+        if let winner = edition.mostPointsWinner { result.append(.winner("Most points won", winner, "star.fill")) }
         if let item = stats.mostLiked, item.value > 0 { result.append(.highlight("Most liked", item, "heart.fill")) }
         if let item = stats.mostCommented, item.value > 0 { result.append(.highlight("Most discussed", item, "bubble.left.and.bubble.right.fill")) }
         let answers = edition.entries.filter { !$0.answer.isEmpty }
@@ -101,6 +103,12 @@ struct MonthlyWrappedView: View {
                 sectionLabel(title.uppercased())
                 Text("“\(item.answer)”").font(.system(size: 30, weight: .semibold, design: .serif)).multilineTextAlignment(.center)
                 Text("BY \(item.authorName.uppercased()) · \(item.value)").font(.caption.weight(.black)).tracking(1)
+            case let .winner(title, name, icon):
+                Image(systemName: icon).font(.system(size: 54)).padding(16).background(accent)
+                sectionLabel("MONTHLY WINNER")
+                Text(title).font(.system(size: 30, weight: .bold, design: .serif)).multilineTextAlignment(.center)
+                Rectangle().frame(height: 3)
+                Text(name.uppercased()).font(.system(size: 45, weight: .black, design: .serif)).multilineTextAlignment(.center)
             case let .question(prompt, responses):
                 sectionLabel("THE MONTH IN WORDS")
                 Text(prompt).font(.system(size: 27, weight: .bold, design: .serif)).multilineTextAlignment(.center)
@@ -118,8 +126,14 @@ struct MonthlyWrappedView: View {
                     }
                 }
             case let .photo(entry):
-                AsyncImage(url: URL(string: entry.imageURL ?? "")) { $0.resizable().scaledToFit() } placeholder: { ProgressView() }
-                    .overlay { Rectangle().stroke(.black, lineWidth: 3) }
+                if entry.imageURL?.hasPrefix("demo://") == true {
+                    Rectangle().fill(Color.black.opacity(0.06)).aspectRatio(4.0 / 5.0, contentMode: .fit)
+                        .overlay { Image(systemName: entry.imageURL?.contains("food") == true ? "fork.knife" : "person.crop.rectangle.fill").font(.system(size: 64)) }
+                        .overlay { Rectangle().stroke(.black, lineWidth: 3) }
+                } else {
+                    AsyncImage(url: URL(string: entry.imageURL ?? "")) { $0.resizable().scaledToFit() } placeholder: { ProgressView() }
+                        .overlay { Rectangle().stroke(.black, lineWidth: 3) }
+                }
                 Text(entry.prompt).font(.title2.bold()).multilineTextAlignment(.center)
                 Text(entry.authorName.uppercased()).font(.caption.bold()).tracking(1)
             case .final:
@@ -182,25 +196,39 @@ private struct WrappedShareImage: Transferable {
 }
 
 private enum WrappedSlide {
-    case intro, stats, highlight(String, WrappedHighlight, String), question(String, [NewsletterEntry]), photo(NewsletterEntry), final
+    case intro, stats, winner(String, String, String), highlight(String, WrappedHighlight, String), question(String, [NewsletterEntry]), photo(NewsletterEntry), final
 }
 
 enum MonthlyWrappedDemo {
     static func edition(groupName: String, displayName: String) -> NewsletterEdition {
         let name = displayName.split(separator: " ").first.map(String.init) ?? "You"
-        let entries = [
-            NewsletterEntry(id: "demo-1", authorName: name, answer: "The night we made dinner without a recipe and somehow stayed at the table for three hours.", prompt: "What moment do you want to remember?", promptID: "demo-memory", imageURL: nil, createdAt: .now.addingTimeInterval(-86400 * 12)),
-            NewsletterEntry(id: "demo-2", authorName: "Maya", answer: "Everyone showing up when I needed them, without making me ask twice.", prompt: "What made you feel cared for this month?", promptID: "demo-care", imageURL: nil, createdAt: .now.addingTimeInterval(-86400 * 6))
+        let people = [name, "Maya", "Alex", "Jordan"]
+        let questions: [(String, [String])] = [
+            ("How did this month feel, in a few honest words?", ["Full, surprising, and a little slower than I expected—in a good way.", "Restorative. I finally made room for weekends that did not need an itinerary.", "A little chaotic, but full of the kind of stories I know we will retell.", "Hopeful. A lot of small things started moving in the right direction."]),
+            ("What was your favorite day this month, and why?", ["The Saturday we got breakfast, walked by the water, and stayed out until sunset.", "Dinner at Jordan’s. We planned to stay for an hour and somehow talked until midnight.", "The beach day—even the part where we forgot the towels and had to improvise.", "My quiet Sunday morning with coffee, music, and nowhere I needed to be."]),
+            ("When did you practice gratitude this month?", ["On a difficult Tuesday, I wrote down three ordinary things that were still good.", "Every time somebody in this group checked in without needing a reason.", "Driving home after the concert, tired and happy, with everyone singing badly.", "When my mom called with good news and I remembered not to rush the conversation."]),
+            ("What did this month teach you about yourself?", ["I do not need a perfect plan before I begin.", "Rest is more useful when I stop trying to earn it first.", "I am better at asking for help than I used to be.", "Consistency can be quiet. It does not have to look impressive to count."])
         ]
+        var entries = questions.enumerated().flatMap { questionIndex, item in
+            people.enumerated().map { personIndex, person in
+                NewsletterEntry(id: "demo-q\(questionIndex)-p\(personIndex)", authorName: person, answer: item.1[personIndex], prompt: item.0, promptID: "demo-question-\(questionIndex)", imageURL: nil, createdAt: .now.addingTimeInterval(-86400 * Double(26 - questionIndex * 7)))
+            }
+        }
+        let selfCaptions = ["Golden hour with the group", "A Saturday by the water", "Finally made it to the concert", "The quiet morning I needed"]
+        let foodCaptions = ["The pasta worth waiting for", "Perfect late-night tacos", "Breakfast that became lunch", "Homemade dumplings at last"]
+        for (index, person) in people.enumerated() {
+            entries.append(NewsletterEntry(id: "demo-photo-self-\(index)", authorName: person, answer: "", prompt: selfCaptions[index], promptID: "demo-photo", imageURL: "demo://self/\(index)", createdAt: .now))
+            entries.append(NewsletterEntry(id: "demo-photo-food-\(index)", authorName: person, answer: "", prompt: foodCaptions[index], promptID: "demo-photo", imageURL: "demo://food/\(index)", createdAt: .now))
+        }
         return NewsletterEdition(
             id: "demo-wrapped", groupID: "demo", groupName: groupName,
             monthKey: "2026-08", monthLabel: "August 2026", entries: entries,
             mostAnswersWinner: "Maya", mostPointsWinner: name,
             stats: MonthlyWrappedStats(
-                answerCount: 74, questionCount: 24, photoCount: 12,
+                answerCount: 16, questionCount: 4, photoCount: 8,
                 participatingMemberCount: 4, groupMemberCount: 4,
-                mostLiked: WrappedHighlight(postID: "demo-1", authorName: name, prompt: entries[0].prompt, answer: entries[0].answer, value: 18),
-                mostCommented: WrappedHighlight(postID: "demo-2", authorName: "Maya", prompt: entries[1].prompt, answer: entries[1].answer, value: 11)
+                mostLiked: WrappedHighlight(postID: entries[0].id, authorName: name, prompt: entries[0].prompt, answer: entries[0].answer, value: 18),
+                mostCommented: WrappedHighlight(postID: entries[5].id, authorName: "Maya", prompt: entries[5].prompt, answer: entries[5].answer, value: 11)
             )
         )
     }
