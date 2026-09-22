@@ -48,9 +48,14 @@ service cloud.firestore {
       }
 
       match /blockedUsers/{blockedUserID} {
-        allow read, create, update, delete: if signedIn()
+        // List queries cannot prove a condition on every document ID. The
+        // owner may read the whole private subcollection, while writes still
+        // prevent a user from blocking their own account.
+        allow read: if signedIn() && request.auth.uid == userID;
+        allow create, update: if signedIn()
           && request.auth.uid == userID
           && blockedUserID != request.auth.uid;
+        allow delete: if signedIn() && request.auth.uid == userID;
       }
     }
 

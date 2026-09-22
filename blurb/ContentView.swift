@@ -129,8 +129,11 @@ struct ContentView: View {
             get: { blurbStore.errorMessage != nil || blurbStore.listenerErrorMessage != nil || auth.errorMessage != nil },
             set: {
                 if !$0 {
-                    blurbStore.clearPresentedErrors()
-                    auth.errorMessage = nil
+                    Task { @MainActor in
+                        await Task.yield()
+                        blurbStore.clearPresentedErrors()
+                        auth.errorMessage = nil
+                    }
                 }
             }
         )) {
@@ -964,58 +967,7 @@ struct PostCard: View {
     var body: some View {
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: hasEarnedBadges ? .top : .center, spacing: 12) {
-                ProfilePhoto(urlString: post.authorPhotoURL, size: 38)
-                    .fixedSize()
-
-                VStack(alignment: .leading, spacing: 5) {
-                    ViewThatFits(in: .horizontal) {
-                        HStack(alignment: .firstTextBaseline, spacing: 8) {
-                            Text(memberNameText(post.authorName, userID: post.isSample ? nil : post.authorID))
-                                .font(.headline)
-                                .fixedSize(horizontal: true, vertical: false)
-                            postMetadata
-                        }
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(memberNameText(post.authorName, userID: post.isSample ? nil : post.authorID))
-                                .font(.headline)
-                                .fixedSize(horizontal: false, vertical: true)
-                            postMetadata
-                        }
-                    }
-                    if hasEarnedBadges {
-                        EarnedBadges(progress: badgeProgress)
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-
-                if editAnswer != nil || deleteAnswer != nil || (!post.isSample && post.authorID != currentUserID) {
-                    Menu {
-                        if editAnswer != nil {
-                            Button("Edit answer") { showingPostEditor = true }
-                        }
-                        if let deleteAnswer {
-                            Button("Delete answer", role: .destructive, action: deleteAnswer)
-                        }
-                        if !post.isSample && post.authorID != currentUserID {
-                            Button("Report answer", systemImage: "exclamationmark.bubble") {
-                                showingReportReasons = true
-                            }
-                            Button("Block \(post.authorName)", systemImage: "person.slash", role: .destructive) {
-                                showingBlockConfirmation = true
-                            }
-                        }
-                    } label: {
-                        Image(systemName: "ellipsis")
-                            .foregroundStyle(.secondary)
-                            .frame(width: 44, height: 44)
-                            .contentShape(Rectangle())
-                    }
-                } else {
-                    Image(systemName: "ellipsis")
-                        .foregroundStyle(.secondary)
-                }
-            }
+                postHeader
 
             if post.isSample {
                 Text("SAMPLE · \(ExampleGroupContent.question)")
@@ -1044,7 +996,117 @@ struct PostCard: View {
                 .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
             }
 
-            HStack(spacing: 18) {
+            postReactions
+
+            }
+            .padding(14)
+            .background(cardFill, in: RoundedRectangle(cornerRadius: 7))
+            .overlay {
+                RoundedRectangle(cornerRadius: 7)
+                    .stroke(colorScheme == .dark ? Color.white.opacity(0.14) : .black, lineWidth: 1.5)
+            }
+            .shadow(color: .black.opacity(colorScheme == .dark ? 0.28 : 0.06), radius: 4, y: 2)
+            .zIndex(1)
+
+            if !previewComments.isEmpty { previewReplies }
+        }
+        .onAppear { blurbStore.listenForComments(on: post) }
+        .onDisappear { blurbStore.stopListeningForComments(on: post.id) }
+        .sheet(isPresented: $showingPostEditor) {
+            PostAnswerEditor(post: post)
+        }
+        .confirmationDialog("Why are you reporting this answer?", isPresented: $showingReportReasons, titleVisibility: .visible) {
+            ForEach(moderationReportReasons, id: \.self) { reason in
+                Button(reason) { reportPost(reason: reason) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Your report is private and will be reviewed.")
+        }
+        .confirmationDialog("Block \(post.authorName)?", isPresented: $showingBlockConfirmation, titleVisibility: .visible) {
+            Button("Block user", role: .destructive) {
+                Task {
+                    if await blurbStore.blockUser(id: post.authorID, displayName: post.authorName) {
+                        moderationNotice = "\(post.authorName) is blocked. Their answers and replies are now hidden."
+                    }
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Their answers and replies will be hidden. You can unblock them in Settings.")
+        }
+        .alert("Moderation", isPresented: Binding(
+            get: { moderationNotice != nil },
+            set: { if !$0 { moderationNotice = nil } }
+        )) {
+            Button("OK", role: .cancel) { moderationNotice = nil }
+        } message: {
+            Text(moderationNotice ?? "")
+        }
+        .modifier(MemberProfileLinks(groupID: post.groupID))
+    }
+
+    private var postHeader: some View {
+        HStack(alignment: hasEarnedBadges ? .top : .center, spacing: 12) {
+                ProfilePhoto(urlString: post.authorPhotoURL, size: 38)
+                    .fixedSize()
+
+                VStack(alignment: .leading, spacing: 5) {
+                    ViewThatFits(in: .horizontal) {
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Text(memberNameText(post.authorName, userID: post.isSample ? nil : post.authorID))
+                                .font(.headline)
+                                .fixedSize(horizontal: true, vertical: false)
+                            postMetadata
+                        }
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(memberNameText(post.authorName, userID: post.isSample ? nil : post.authorID))
+                                .font(.headline)
+                                .fixedSize(horizontal: false, vertical: true)
+                            postMetadata
+                        }
+                    }
+                    if hasEarnedBadges {
+                        EarnedBadges(progress: badgeProgress)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            postMenu
+        }
+    }
+
+    @ViewBuilder private var postMenu: some View {
+        if editAnswer != nil || deleteAnswer != nil || (!post.isSample && post.authorID != currentUserID) {
+            Menu {
+                if editAnswer != nil {
+                    Button("Edit answer") { showingPostEditor = true }
+                }
+                if let deleteAnswer {
+                    Button("Delete answer", role: .destructive, action: deleteAnswer)
+                }
+                if !post.isSample && post.authorID != currentUserID {
+                    Button("Report answer", systemImage: "exclamationmark.bubble") {
+                        showingReportReasons = true
+                    }
+                    Button("Block \(post.authorName)", systemImage: "person.slash", role: .destructive) {
+                        showingBlockConfirmation = true
+                    }
+                }
+            } label: {
+                Image(systemName: "ellipsis")
+                    .foregroundStyle(.secondary)
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+            }
+        } else {
+            Image(systemName: "ellipsis")
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var postReactions: some View {
+        HStack(spacing: 18) {
                 Button(action: toggleLike) {
                     HStack(spacing: 6) {
                         Image(systemName: post.likeIDs.contains(currentUserID ?? "") ? "heart.fill" : "heart")
@@ -1069,23 +1131,14 @@ struct PostCard: View {
                 .accessibilityLabel("Open replies")
                 .accessibilityValue("\(post.commentCount) replies")
                 Spacer(minLength: 0)
-            }
-            .font(.subheadline)
-            .buttonStyle(.plain)
-            .padding(.vertical, -6)
+        }
+        .font(.subheadline)
+        .buttonStyle(.plain)
+        .padding(.vertical, -6)
+    }
 
-            }
-            .padding(14)
-            .background(cardFill, in: RoundedRectangle(cornerRadius: 7))
-            .overlay {
-                RoundedRectangle(cornerRadius: 7)
-                    .stroke(colorScheme == .dark ? Color.white.opacity(0.14) : .black, lineWidth: 1.5)
-            }
-            .shadow(color: .black.opacity(colorScheme == .dark ? 0.28 : 0.06), radius: 4, y: 2)
-            .zIndex(1)
-
-            if !previewComments.isEmpty {
-                VStack(alignment: .leading, spacing: 0) {
+    private var previewReplies: some View {
+        VStack(alignment: .leading, spacing: 0) {
                     ForEach(previewComments) { comment in
                         CompactCommentRow(comment: comment, post: post)
                         if comment.id != previewComments.last?.id {
@@ -1134,42 +1187,6 @@ struct PostCard: View {
                 )
                 .padding(.horizontal, 10)
                 .padding(.top, -2)
-            }
-        }
-        .onAppear { blurbStore.listenForComments(on: post) }
-        .onDisappear { blurbStore.stopListeningForComments(on: post.id) }
-        .sheet(isPresented: $showingPostEditor) {
-            PostAnswerEditor(post: post)
-        }
-        .confirmationDialog("Why are you reporting this answer?", isPresented: $showingReportReasons, titleVisibility: .visible) {
-            ForEach(moderationReportReasons, id: \.self) { reason in
-                Button(reason) { reportPost(reason: reason) }
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("Your report is private and will be reviewed.")
-        }
-        .confirmationDialog("Block \(post.authorName)?", isPresented: $showingBlockConfirmation, titleVisibility: .visible) {
-            Button("Block user", role: .destructive) {
-                Task {
-                    if await blurbStore.blockUser(id: post.authorID, displayName: post.authorName) {
-                        moderationNotice = "\(post.authorName) is blocked. Their answers and replies are now hidden."
-                    }
-                }
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("Their answers and replies will be hidden. You can unblock them in Settings.")
-        }
-        .alert("Moderation", isPresented: Binding(
-            get: { moderationNotice != nil },
-            set: { if !$0 { moderationNotice = nil } }
-        )) {
-            Button("OK", role: .cancel) { moderationNotice = nil }
-        } message: {
-            Text(moderationNotice ?? "")
-        }
-        .modifier(MemberProfileLinks(groupID: post.groupID))
     }
 
     private func reportPost(reason: String) {
@@ -1648,66 +1665,8 @@ struct CommentsView: View {
                                 .background(Color(red: 1, green: 0.78, blue: 0.02))
                         }
 
-                        VStack(alignment: .leading, spacing: 10) {
-                            Text("IN RESPONSE TO")
-                                .font(.system(.caption2, design: .serif).weight(.black))
-                                .tracking(1.2)
-                                .foregroundStyle(.secondary)
-                            HStack(spacing: 11) {
-                                ProfilePhoto(urlString: post.authorPhotoURL, size: 34)
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(memberNameText(post.authorName, userID: post.isSample ? nil : post.authorID))
-                                        .font(.system(.subheadline, design: .serif).bold())
-                                    Text(post.timeLabel)
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                    if let city = post.cityLocation {
-                                        Label(city.city, systemImage: "mappin.and.ellipse")
-                                            .font(.caption2)
-                                            .foregroundStyle(.secondary)
-                                    }
-                                }
-                            }
-                            Text(mentionText(post.answer))
-                                .font(.system(.subheadline, design: .serif))
-                                .lineSpacing(2)
-                            if let imageURL = post.imageURL {
-                                AsyncImage(url: URL(string: imageURL)) { image in
-                                    image.resizable().scaledToFit()
-                                } placeholder: { ProgressView() }
-                                .frame(maxHeight: 150)
-                                .clipShape(RoundedRectangle(cornerRadius: 4))
-                            }
-                        }
-                        .padding(14)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(colorScheme == .dark ? Color.white.opacity(0.06) : Color.white.opacity(0.55))
-                        .overlay(alignment: .leading) { Rectangle().fill(accent).frame(width: 3) }
-                        .clipShape(RoundedRectangle(cornerRadius: 4))
-
-                        VStack(alignment: .leading, spacing: 6) {
-                            if comments.isEmpty {
-                                VStack(spacing: 10) {
-                                    Image(systemName: "text.bubble")
-                                        .font(.system(size: 28, weight: .medium))
-                                        .foregroundStyle(accent)
-                                    Text("No replies yet")
-                                        .font(.system(.title3, design: .serif).bold())
-                                    Text("Be the first person to add a note.")
-                                        .font(.subheadline)
-                                        .foregroundStyle(.secondary)
-                                }
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 24)
-                            } else {
-                                ForEach(comments) { comment in
-                                    CommentRow(comment: comment, post: post, accent: accent)
-                                    if comment.id != comments.last?.id {
-                                        Rectangle().fill(Color.primary.opacity(0.10)).frame(height: 1).padding(.leading, 43)
-                                    }
-                                }
-                            }
-                        }
+                        responseSummary
+                        repliesList
                     }
                     .padding(.horizontal, 18)
                     .padding(.vertical, 10)
@@ -1722,44 +1681,113 @@ struct CommentsView: View {
                 }
             }
             .safeAreaInset(edge: .bottom) {
-                VStack(spacing: 6) {
-                    MentionSuggestions(text: $newComment, names: blurbStore.mentionNames(in: post.groupID))
-                HStack(spacing: 10) {
-                    TextField("Write a reply…", text: $newComment, axis: .vertical)
-                        .font(.subheadline)
-                        .lineLimit(1...4)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 10)
-                        .background(colorScheme == .dark ? Color.white.opacity(0.06) : Color.white.opacity(0.6), in: RoundedRectangle(cornerRadius: 6))
-                        .overlay { RoundedRectangle(cornerRadius: 6).stroke(Color.primary.opacity(0.16), lineWidth: 1) }
-
-                    Button { sendComment() } label: {
-                        Group {
-                            if isSending {
-                                ProgressView().tint(.black)
-                            } else {
-                                Image(systemName: "arrow.up")
-                            }
-                        }
-                        .font(.headline)
-                        .foregroundStyle(.black)
-                        .frame(width: 44, height: 44)
-                        .background(accent, in: RoundedRectangle(cornerRadius: 6))
-                    }
-                    .accessibilityLabel("Send reply")
-                    .disabled(isSending || newComment.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    .opacity(newComment.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0.45 : 1)
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 6)
-                .background(.ultraThinMaterial)
-                .overlay(alignment: .top) { Rectangle().fill(Color.primary.opacity(0.18)).frame(height: 1) }
-                }
+                replyComposer
             }
             .onAppear { blurbStore.listenForComments(on: post) }
             .onDisappear { blurbStore.stopListeningForComments(on: post.id) }
         }
         .modifier(MemberProfileLinks(groupID: post.groupID))
+    }
+
+    private var responseSummary: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("IN RESPONSE TO")
+                .font(.system(.caption2, design: .serif).weight(.black))
+                .tracking(1.2)
+                .foregroundStyle(.secondary)
+            HStack(spacing: 11) {
+                ProfilePhoto(urlString: post.authorPhotoURL, size: 34)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(memberNameText(post.authorName, userID: post.isSample ? nil : post.authorID))
+                        .font(.system(.subheadline, design: .serif).bold())
+                    Text(post.timeLabel)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if let city = post.cityLocation {
+                        Label(city.city, systemImage: "mappin.and.ellipse")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            Text(mentionText(post.answer))
+                .font(.system(.subheadline, design: .serif))
+                .lineSpacing(2)
+            if let imageURL = post.imageURL {
+                AsyncImage(url: URL(string: imageURL)) { image in
+                    image.resizable().scaledToFit()
+                } placeholder: { ProgressView() }
+                .frame(maxHeight: 150)
+                .clipShape(RoundedRectangle(cornerRadius: 4))
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(colorScheme == .dark ? Color.white.opacity(0.06) : Color.white.opacity(0.55))
+        .overlay(alignment: .leading) { Rectangle().fill(accent).frame(width: 3) }
+        .clipShape(RoundedRectangle(cornerRadius: 4))
+    }
+
+    private var repliesList: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if comments.isEmpty {
+                VStack(spacing: 10) {
+                    Image(systemName: "text.bubble")
+                        .font(.system(size: 28, weight: .medium))
+                        .foregroundStyle(accent)
+                    Text("No replies yet")
+                        .font(.system(.title3, design: .serif).bold())
+                    Text("Be the first person to add a note.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 24)
+            } else {
+                ForEach(comments) { comment in
+                    CommentRow(comment: comment, post: post, accent: accent)
+                    if comment.id != comments.last?.id {
+                        Rectangle().fill(Color.primary.opacity(0.10)).frame(height: 1).padding(.leading, 43)
+                    }
+                }
+            }
+        }
+    }
+
+    private var replyComposer: some View {
+        VStack(spacing: 6) {
+            MentionSuggestions(text: $newComment, names: blurbStore.mentionNames(in: post.groupID))
+            HStack(spacing: 10) {
+                TextField("Write a reply…", text: $newComment, axis: .vertical)
+                    .font(.subheadline)
+                    .lineLimit(1...4)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(colorScheme == .dark ? Color.white.opacity(0.06) : Color.white.opacity(0.6), in: RoundedRectangle(cornerRadius: 6))
+                    .overlay { RoundedRectangle(cornerRadius: 6).stroke(Color.primary.opacity(0.16), lineWidth: 1) }
+
+                Button { sendComment() } label: {
+                    Group {
+                        if isSending {
+                            ProgressView().tint(.black)
+                        } else {
+                            Image(systemName: "arrow.up")
+                        }
+                    }
+                    .font(.headline)
+                    .foregroundStyle(.black)
+                    .frame(width: 44, height: 44)
+                    .background(accent, in: RoundedRectangle(cornerRadius: 6))
+                }
+                .accessibilityLabel("Send reply")
+                .disabled(isSending || newComment.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .opacity(newComment.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0.45 : 1)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 6)
+            .background(.ultraThinMaterial)
+            .overlay(alignment: .top) { Rectangle().fill(Color.primary.opacity(0.18)).frame(height: 1) }
+        }
     }
 
     private func sendComment() {
