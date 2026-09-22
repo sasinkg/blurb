@@ -68,9 +68,11 @@ struct ContentView: View {
     @State private var homeAnswerDraft: String?
     @State private var homeImageDraft: Data?
     @State private var dailyPromptClock = Date.now
+    @State private var showingBlurbMapAnnouncement = false
     @AppStorage("birthdayQuestionsEnabled") private var birthdayQuestionsEnabled = false
     @AppStorage("birthdayQuestion") private var birthdayQuestion = ""
     @AppStorage("birthdayTimestamp") private var birthdayTimestamp = Date.now.timeIntervalSince1970
+    @AppStorage("hasSeenBlurbMapAnnouncementV1") private var hasSeenBlurbMapAnnouncement = false
 
     var body: some View {
         TabView(selection: $selectedTab) {
@@ -106,6 +108,22 @@ struct ContentView: View {
         )) {
             GroupOnboardingView()
                 .interactiveDismissDisabled()
+        }
+        .sheet(isPresented: $showingBlurbMapAnnouncement) {
+            hasSeenBlurbMapAnnouncement = true
+        } content: {
+            BlurbMapAnnouncementView()
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.hidden)
+                .presentationBackground(.ultraThinMaterial)
+        }
+        .task(id: blurbStore.groups.count) {
+            guard blurbStore.groupsLoaded,
+                  !blurbStore.groups.isEmpty,
+                  !hasSeenBlurbMapAnnouncement else { return }
+            try? await Task.sleep(for: .milliseconds(450))
+            guard !Task.isCancelled else { return }
+            showingBlurbMapAnnouncement = true
         }
         .alert("Daily Blurb", isPresented: Binding(
             get: { blurbStore.errorMessage != nil || blurbStore.listenerErrorMessage != nil || auth.errorMessage != nil },
@@ -263,6 +281,134 @@ struct ContentView: View {
         homeImageDraft = nil
     }
 
+}
+
+private struct BlurbMapAnnouncementView: View {
+    @Environment(\.dismiss) private var dismiss
+    @AppStorage("cityLocationEnabled") private var cityLocationEnabled = false
+    @State private var isRequestingLocation = false
+    @State private var locationError: String?
+
+    var body: some View {
+        ZStack {
+            GlassBackground()
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    HStack(alignment: .top) {
+                        Text("NEW IN BLURB")
+                            .font(.caption.weight(.black))
+                            .tracking(1.5)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .foregroundStyle(.black)
+                            .background(Color(red: 1, green: 0.78, blue: 0.02))
+
+                        Spacer()
+
+                        Button { dismiss() } label: {
+                            Image(systemName: "xmark")
+                                .font(.body.weight(.bold))
+                                .frame(width: 38, height: 38)
+                                .background(.thinMaterial, in: Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Close")
+                    }
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Introducing Blurb Map")
+                            .font(.system(size: 32, weight: .bold, design: .serif))
+                        Text("See the cities behind your group’s daily answers—and revisit everywhere you posted in the monthly newsletter.")
+                            .font(.body)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 22)
+                            .fill(Color.primary.opacity(0.055))
+                        Image("WorldMapSilhouette")
+                            .resizable()
+                            .renderingMode(.template)
+                            .aspectRatio(contentMode: .fit)
+                            .padding(16)
+                            .foregroundStyle(Color(red: 1, green: 0.78, blue: 0.02))
+                        mapDot("3", x: -78, y: -20)
+                        mapDot("7", x: -42, y: 10)
+                        mapDot("2", x: 58, y: -8)
+                    }
+                    .frame(height: 150)
+                    .accessibilityHidden(true)
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Label("Share your city on new Blurbs?", systemImage: "mappin.and.ellipse")
+                            .font(.headline)
+                        Text("Your phone converts your location to a city, region, and country. Your precise coordinates are never saved.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Button {
+                        enableCitySharing()
+                    } label: {
+                        HStack {
+                            if isRequestingLocation {
+                                ProgressView().tint(.black)
+                            } else {
+                                Image(systemName: "location.fill")
+                            }
+                            Text(isRequestingLocation ? "Finding your city…" : "Share my city")
+                        }
+                        .font(.headline)
+                        .foregroundStyle(.black)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 14)
+                        .background(Color(red: 1, green: 0.78, blue: 0.02), in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isRequestingLocation)
+
+                    Button("Not now") { dismiss() }
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity)
+                        .padding(.bottom, 4)
+                }
+                .padding(22)
+            }
+        }
+        .alert("Location unavailable", isPresented: Binding(
+            get: { locationError != nil },
+            set: { if !$0 { locationError = nil } }
+        )) {
+            Button("OK", role: .cancel) { locationError = nil }
+        } message: {
+            Text(locationError ?? "Please try again.")
+        }
+    }
+
+    private func mapDot(_ number: String, x: CGFloat, y: CGFloat) -> some View {
+        Text(number)
+            .font(.caption.weight(.black))
+            .foregroundStyle(.white)
+            .frame(width: 30, height: 30)
+            .background(.black, in: Circle())
+            .offset(x: x, y: y)
+    }
+
+    private func enableCitySharing() {
+        isRequestingLocation = true
+        Task {
+            if await CityLocationProvider.shared.currentCity() != nil {
+                cityLocationEnabled = true
+                dismiss()
+            } else {
+                cityLocationEnabled = false
+                locationError = "Allow Location access for Daily Blurb in iPhone Settings to share your city. You can turn this off anytime in Blurb Settings."
+            }
+            isRequestingLocation = false
+        }
+    }
 }
 
 private struct HomeAudiencePicker: View {
