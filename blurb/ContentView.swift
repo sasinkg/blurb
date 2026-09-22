@@ -2750,7 +2750,9 @@ struct SettingsView: View {
                 .tracking(1)
                 .foregroundStyle(.secondary)
             content()
+                .toggleStyle(SwitchToggleStyle(tint: Color(red: 1, green: 0.78, blue: 0.02)))
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(18)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22))
     }
