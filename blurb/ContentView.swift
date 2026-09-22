@@ -858,6 +858,12 @@ struct PostCard: View {
             }
             Text(mentionText(post.answer))
                 .font(.body)
+            if let city = post.cityLocation {
+                Label(city.city, systemImage: "mappin.and.ellipse")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel("Posted from \(city.city)")
+            }
 
             if let imageURL = post.imageURL {
                 AsyncImage(url: URL(string: imageURL)) { image in
@@ -981,11 +987,6 @@ struct PostCard: View {
             }
             Text(post.timeLabel)
                 .foregroundStyle(.secondary)
-            if let city = post.cityLocation {
-                Label(city.city, systemImage: "mappin.and.ellipse")
-                    .foregroundStyle(.secondary)
-                    .accessibilityLabel("Posted from \(city.city)")
-            }
         }
         .font(.caption2)
         .fixedSize(horizontal: true, vertical: false)
@@ -1109,14 +1110,6 @@ private struct GrowingAnswerField: UIViewRepresentable {
         textView.textContainer.lineFragmentPadding = 0
         textView.isScrollEnabled = false
         textView.delegate = context.coordinator
-        let keyboardToolbar = UIToolbar()
-        keyboardToolbar.sizeToFit()
-        keyboardToolbar.items = [
-            UIBarButtonItem(systemItem: .flexibleSpace),
-            UIBarButtonItem(title: "Done", style: .done, target: textView,
-                            action: #selector(UIResponder.resignFirstResponder))
-        ]
-        textView.inputAccessoryView = keyboardToolbar
         textView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         DispatchQueue.main.async {
