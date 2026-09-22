@@ -63,7 +63,7 @@ struct MonthlyCityMap: View {
             }
         }
         .frame(maxWidth: .infinity)
-        .aspectRatio(2.16, contentMode: .fit)
+        .aspectRatio(2, contentMode: .fit)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Map of cities represented this month")
         .task(id: cities) { await resolvePins() }
@@ -177,8 +177,8 @@ struct MonthlyCityMap: View {
 }
 
 private enum WorldMapProjection {
-    static let north: CGFloat = 83
-    static let south: CGFloat = -58
+    static let north: CGFloat = 90
+    static let south: CGFloat = -90
 
     static func point(longitude: CGFloat, latitude: CGFloat, in rect: CGRect) -> CGPoint {
         CGPoint(
