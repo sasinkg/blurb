@@ -247,11 +247,37 @@ final class BlurbStore: ObservableObject {
         }
     }
 
+    func uploadPrivatePhotoOfMonth(_ imageData: Data, in groupID: String) async -> Bool {
+        guard let userID = currentUserID else {
+            errorMessage = "Sign in to choose a photo."
+            return false
+        }
+        let monthKey = Self.photoMonthKey()
+        let path = "photo-of-month/\(groupID)/\(userID)/\(monthKey)/\(UUID().uuidString).jpg"
+        let reference = Storage.storage().reference().child(path)
+        do {
+            let metadata = StorageMetadata()
+            metadata.contentType = "image/jpeg"
+            _ = try await reference.putDataAsync(imageData, metadata: metadata)
+            _ = try await Functions.functions().httpsCallable("setPhotoOfMonthSelection")
+                .call(["groupID": groupID, "storagePath": path])
+            return true
+        } catch {
+            try? await reference.delete()
+            errorMessage = error.localizedDescription
+            return false
+        }
+    }
+
     private static func photoSelectionID(groupID: String, date: Date = .now) -> String {
+        "\(groupID)_\(photoMonthKey(date: date))"
+    }
+
+    private static func photoMonthKey(date: Date = .now) -> String {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(identifier: "America/Los_Angeles")!
         let parts = calendar.dateComponents([.year, .month], from: date)
-        return String(format: "%@_%04d-%02d", groupID, parts.year ?? 0, parts.month ?? 0)
+        return String(format: "%04d-%02d", parts.year ?? 0, parts.month ?? 0)
     }
 
     func existingAnswer(promptID: String, in groupID: String) async -> BlurbPost? {
@@ -1160,6 +1186,16 @@ final class BlurbStore: ObservableObject {
                         .delete()
                 }
 
+                // Remove private, unpublished Photo of the Month uploads too.
+                if let monthFolders = try? await Storage.storage().reference()
+                    .child("photo-of-month/\(group.id)/\(userID)").listAll() {
+                    for monthFolder in monthFolders.prefixes {
+                        if let photos = try? await monthFolder.listAll() {
+                            for photo in photos.items { try? await photo.delete() }
+                        }
+                    }
+                }
+
                 let groupReference = database.collection("groups").document(group.id)
                 if group.ownerID == userID {
                     let remainingMembers = group.memberIDs.filter { $0 != userID }
@@ -1185,6 +1221,11 @@ final class BlurbStore: ObservableObject {
                 .collection("blockedUsers").getDocuments()
             for blockedUser in blockedUsers.documents {
                 try await blockedUser.reference.delete()
+            }
+            let photoSelections = try await database.collection("users").document(userID)
+                .collection("photoOfMonthSelections").getDocuments()
+            for selection in photoSelections.documents {
+                try await selection.reference.delete()
             }
             try? await Storage.storage().reference().child("profile-images/\(userID).jpg").delete()
             try await database.collection("users").document(userID).delete()

@@ -2,8 +2,9 @@ const {onDocumentCreated, onDocumentWritten} = require("firebase-functions/v2/fi
 const {onSchedule} = require("firebase-functions/v2/scheduler");
 const {onCall, HttpsError} = require("firebase-functions/v2/https");
 const {initializeApp} = require("firebase-admin/app");
-const {getFirestore, FieldValue} = require("firebase-admin/firestore");
+const {getFirestore, FieldValue, Timestamp} = require("firebase-admin/firestore");
 const {getMessaging} = require("firebase-admin/messaging");
+const {getStorage, getDownloadURL} = require("firebase-admin/storage");
 
 initializeApp();
 
@@ -15,6 +16,7 @@ const {
   photoMonthKey,
   selectionDocumentID,
   validateSelectionInput,
+  validPrivatePhotoPath,
 } = require("./photoOfMonth");
 
 exports.setPhotoOfMonthSelection = onCall(async (request) => {
@@ -35,19 +37,38 @@ exports.setPhotoOfMonthSelection = onCall(async (request) => {
     throw new HttpsError("permission-denied", "You are not a member of this group.");
   }
 
-  const postSnapshot = await database.doc(`posts/${input.postID}`).get();
-  const post = postSnapshot.data();
-  if (!postSnapshot.exists || post.groupID !== input.groupID || post.authorID !== userID) {
-    throw new HttpsError("permission-denied", "Choose one of your own Blurbs from this group.");
-  }
-  if (typeof post.imageURL !== "string" || !post.imageURL) {
-    throw new HttpsError("failed-precondition", "The selected Blurb does not have a photo.");
-  }
-
-  const createdAt = post.createdAt?.toDate?.();
   const monthKey = photoMonthKey(new Date());
-  if (!createdAt || photoMonthKey(createdAt) !== monthKey) {
-    throw new HttpsError("failed-precondition", "Choose a photo posted during the current month.");
+  let post;
+  if (input.postID) {
+    const postSnapshot = await database.doc(`posts/${input.postID}`).get();
+    post = postSnapshot.data();
+    if (!postSnapshot.exists || post.groupID !== input.groupID || post.authorID !== userID) {
+      throw new HttpsError("permission-denied", "Choose one of your own Blurbs from this group.");
+    }
+    if (typeof post.imageURL !== "string" || !post.imageURL) {
+      throw new HttpsError("failed-precondition", "The selected Blurb does not have a photo.");
+    }
+    const createdAt = post.createdAt?.toDate?.();
+    if (!createdAt || photoMonthKey(createdAt) !== monthKey) {
+      throw new HttpsError("failed-precondition", "Choose a photo posted during the current month.");
+    }
+  } else {
+    if (!validPrivatePhotoPath(input.storagePath, input.groupID, userID, monthKey)) {
+      throw new HttpsError("invalid-argument", "Invalid private photo path.");
+    }
+    const file = getStorage().bucket().file(input.storagePath);
+    const [exists] = await file.exists();
+    if (!exists) throw new HttpsError("not-found", "The uploaded photo was not found.");
+    const [metadata] = await file.getMetadata();
+    if (!metadata.contentType?.startsWith("image/") || Number(metadata.size) >= 5 * 1024 * 1024) {
+      throw new HttpsError("failed-precondition", "Upload a photo smaller than 5 MB.");
+    }
+    const profile = (await database.doc(`users/${userID}`).get()).data();
+    post = {
+      imageURL: await getDownloadURL(file),
+      authorName: profile?.displayName ?? "Blurb friend",
+      createdAt: Timestamp.now(),
+    };
   }
 
   const reference = database.doc(

@@ -1,3 +1,4 @@
+import PhotosUI
 import SwiftUI
 
 struct GroupNewsletterHomeView: View {
@@ -165,11 +166,13 @@ struct GroupNewsletterHomeView: View {
     }
 }
 
-private struct PhotoOfMonthPickerView: View {
+struct PhotoOfMonthPickerView: View {
     @EnvironmentObject private var blurbStore: BlurbStore
     @Environment(\.dismiss) private var dismiss
     let group: BlurbGroup
     @State private var savingPostID: String?
+    @State private var photoItem: PhotosPickerItem?
+    @State private var isUploading = false
 
     private var posts: [BlurbPost] { blurbStore.photoPostsForCurrentMonth(in: group.id) }
     private var selection: PhotoOfMonthSelection? { blurbStore.photoOfMonthSelection(in: group.id) }
@@ -177,10 +180,44 @@ private struct PhotoOfMonthPickerView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                Text("Pick one photo you posted this month. Your choice stays private until the monthly recap, and you can change it until the month ends.")
+                Text("Choose a photo you already posted, or upload one just for the newsletter. Your selection stays private until the monthly recap, and you can change it until the month ends.")
                     .foregroundStyle(.secondary)
+
+                if let selection {
+                    HStack(spacing: 12) {
+                        AsyncImage(url: URL(string: selection.imageURL)) { image in
+                            image.resizable().scaledToFill()
+                        } placeholder: { Rectangle().fill(.quaternary) }
+                        .frame(width: 64, height: 64)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Your selection").font(.headline)
+                            Text("Only you can see it until the newsletter is published.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+
+                PhotosPicker(selection: $photoItem, matching: .images) {
+                    HStack {
+                        Label("Upload a private photo", systemImage: "photo.badge.plus")
+                        Spacer()
+                        if isUploading { ProgressView() }
+                    }
+                    .font(.headline)
+                    .padding(16)
+                    .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12))
+                }
+                .disabled(isUploading || savingPostID != nil)
+
+                Text("Private uploads do not appear in the daily group feed. Photos you already posted remain visible there.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Text("Or choose a photo you posted this month")
+                    .font(.headline)
                 if posts.isEmpty {
-                    ContentUnavailableView("No photos yet", systemImage: "photo", description: Text("Post a photo in this group, then return here to select it."))
+                    ContentUnavailableView("No posted photos yet", systemImage: "photo", description: Text("You can upload a private photo above instead."))
                 } else {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 145), spacing: 12)], spacing: 12) {
                         ForEach(posts) { post in
@@ -203,7 +240,7 @@ private struct PhotoOfMonthPickerView: View {
                                 }
                             }
                             .buttonStyle(.plain)
-                            .disabled(savingPostID != nil)
+                            .disabled(savingPostID != nil || isUploading)
                             .accessibilityLabel(selection?.postID == post.id ? "Selected photo" : "Select photo")
                         }
                     }
@@ -212,6 +249,23 @@ private struct PhotoOfMonthPickerView: View {
         }
         .navigationTitle("Photo of the Month")
         .navigationBarTitleDisplayMode(.inline)
+        .onChange(of: photoItem) { _, item in
+            guard let item else { return }
+            isUploading = true
+            Task {
+                defer { isUploading = false; photoItem = nil }
+                do {
+                    guard let data = try await item.loadTransferable(type: Data.self),
+                          let jpeg = preparedJPEG(from: data) else {
+                        blurbStore.errorMessage = "Could not read that photo. Please choose another."
+                        return
+                    }
+                    if await blurbStore.uploadPrivatePhotoOfMonth(jpeg, in: group.id) { dismiss() }
+                } catch {
+                    blurbStore.errorMessage = error.localizedDescription
+                }
+            }
+        }
     }
 }
 

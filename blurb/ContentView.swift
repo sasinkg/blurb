@@ -705,7 +705,14 @@ private struct GroupFeedView: View {
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                NavigationLink {
+                    PhotoOfMonthPickerView(group: group)
+                } label: {
+                    Image(systemName: "photo.badge.plus")
+                }
+                .accessibilityLabel("Choose Photo of the Month")
+
                 NavigationLink {
                     GroupNewsletterHomeView(group: group)
                 } label: {

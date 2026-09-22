@@ -31,5 +31,18 @@ service firebase.storage {
         && request.resource.size < 5 * 1024 * 1024
         && request.resource.contentType.matches('image/.*');
     }
+
+    match /photo-of-month/{groupID}/{userID}/{monthKey}/{fileName} {
+      // Private until the monthly newsletter copies the selected image URL.
+      allow read, delete: if request.auth != null && request.auth.uid == userID;
+      allow create: if request.auth != null
+        && request.auth.uid == userID
+        && firestore.get(
+          /databases/(default)/documents/groups/$(groupID)
+        ).data.memberIDs.hasAny([request.auth.uid])
+        && request.resource.size < 5 * 1024 * 1024
+        && request.resource.contentType == 'image/jpeg';
+      allow update: if false;
+    }
   }
 }

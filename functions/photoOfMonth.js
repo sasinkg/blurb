@@ -14,9 +14,17 @@ function photoMonthKey(date, timeZone = "America/Los_Angeles") {
 function validateSelectionInput(data) {
   const groupID = typeof data?.groupID === "string" ? data.groupID.trim() : "";
   const postID = typeof data?.postID === "string" ? data.postID.trim() : "";
+  const storagePath = typeof data?.storagePath === "string" ? data.storagePath.trim() : "";
   if (!groupID) throw new Error("A group is required.");
-  if (!postID) throw new Error("A photo post is required.");
-  return {groupID, postID};
+  if (Boolean(postID) === Boolean(storagePath)) {
+    throw new Error("Choose a photo post or upload a private photo.");
+  }
+  return {groupID, postID, storagePath};
+}
+
+function validPrivatePhotoPath(path, groupID, userID, monthKey) {
+  const prefix = `photo-of-month/${groupID}/${userID}/${monthKey}/`;
+  return path.startsWith(prefix) && /^[0-9a-fA-F-]{36}\.jpg$/.test(path.slice(prefix.length));
 }
 
 function selectionDocumentID(groupID, monthKey) {
@@ -43,4 +51,5 @@ module.exports = {
   photoMonthKey,
   selectionDocumentID,
   validateSelectionInput,
+  validPrivatePhotoPath,
 };
