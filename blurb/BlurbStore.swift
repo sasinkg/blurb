@@ -73,6 +73,11 @@ struct BlurbComment: Identifiable, Hashable {
     var likeIDs: [String] = []
 }
 
+struct BlockedUser: Identifiable, Hashable {
+    let id: String
+    let displayName: String
+}
+
 struct MonthlyWinner {
     let title: String
     let points: Int
@@ -150,6 +155,7 @@ final class BlurbStore: ObservableObject {
     @Published private(set) var profileLoaded = false
     @Published private(set) var needsProfileSetup = false
     @Published private(set) var commentsByPostID: [String: [BlurbComment]] = [:]
+    @Published private(set) var blockedUsers: [BlockedUser] = []
     @Published private(set) var newsletterEditions: [NewsletterEdition] = []
     @Published private(set) var photoOfMonthSelections: [String: PhotoOfMonthSelection] = [:]
     @Published var selectedGroupID: String?
@@ -160,10 +166,13 @@ final class BlurbStore: ObservableObject {
     private var groupsListener: ListenerRegistration?
     private var postsListener: ListenerRegistration?
     private var profileListener: ListenerRegistration?
+    private var blockedUsersListener: ListenerRegistration?
     private var newsletterListener: ListenerRegistration?
     private var photoOfMonthListener: ListenerRegistration?
     private var answerCountListeners: [String: ListenerRegistration] = [:]
     private var commentListeners: [String: ListenerRegistration] = [:]
+    private var unfilteredPosts: [BlurbPost] = []
+    private var unfilteredCommentsByPostID: [String: [BlurbComment]] = [:]
     private var currentUserID: String?
     private var activeAnswerCountPromptID: String?
     private var listenerGeneration = 0
@@ -348,6 +357,24 @@ final class BlurbStore: ObservableObject {
                 }
             }
 
+        blockedUsersListener = database.collection("users").document(userID)
+            .collection("blockedUsers")
+            .addSnapshotListener { [weak self] snapshot, error in
+                guard let self else { return }
+                Task { @MainActor in
+                    guard self.listenerGeneration == generation else { return }
+                    if let error {
+                        self.recordListenerError(error, source: "blocked-users")
+                        return
+                    }
+                    self.blockedUsers = (snapshot?.documents ?? []).map {
+                        BlockedUser(id: $0.documentID, displayName: $0.data()["displayName"] as? String ?? "Blocked user")
+                    }.sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+                    self.applyBlockedContentFilter()
+                    self.clearListenerError(source: "blocked-users")
+                }
+            }
+
         newsletterListener = database.collection("newsletterEditions")
             .whereField("viewerIDs", arrayContains: userID)
             .addSnapshotListener { [weak self] snapshot, error in
@@ -381,6 +408,7 @@ final class BlurbStore: ObservableObject {
         groupsListener?.remove(); groupsListener = nil
         postsListener?.remove(); postsListener = nil
         profileListener?.remove(); profileListener = nil
+        blockedUsersListener?.remove(); blockedUsersListener = nil
         newsletterListener?.remove(); newsletterListener = nil
         photoOfMonthListener?.remove(); photoOfMonthListener = nil
         answerCountListeners.values.forEach { $0.remove() }
@@ -398,7 +426,7 @@ final class BlurbStore: ObservableObject {
         profile = BlurbProfile()
         profileLoaded = false
         needsProfileSetup = false
-        groups = []; groupsLoaded = false; posts = []; answerCountsByGroup = [:]; myAnswerStatusByGroup = [:]; commentsByPostID = [:]; newsletterEditions = []; photoOfMonthSelections = [:]; selectedGroupID = nil
+        groups = []; groupsLoaded = false; posts = []; unfilteredPosts = []; answerCountsByGroup = [:]; myAnswerStatusByGroup = [:]; commentsByPostID = [:]; unfilteredCommentsByPostID = [:]; blockedUsers = []; newsletterEditions = []; photoOfMonthSelections = [:]; selectedGroupID = nil
         errorMessage = nil
         listenerErrors = [:]
         listenerErrorMessage = nil
@@ -505,6 +533,10 @@ final class BlurbStore: ObservableObject {
         guard let userID = currentUserID else { return false }
         let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else { return false }
+        guard ContentModeration.allows(name) else {
+            errorMessage = ContentModeration.rejectionMessage
+            return false
+        }
         do {
             let reference = database.collection("groups").document()
             let inviteCode = Self.makeInviteCode()
@@ -648,6 +680,10 @@ final class BlurbStore: ObservableObject {
         }
         let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else { return false }
+        guard ContentModeration.allows(name) else {
+            errorMessage = ContentModeration.rejectionMessage
+            return false
+        }
         do {
             try await database.collection("groups").document(group.id).updateData(["name": name])
             return true
@@ -707,6 +743,10 @@ final class BlurbStore: ObservableObject {
         }
         let trimmedAnswer = answer.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedAnswer.isEmpty || (prompt.requiresPhoto && imageData != nil) else { return false }
+        guard ContentModeration.allows(trimmedAnswer) else {
+            errorMessage = ContentModeration.rejectionMessage
+            return false
+        }
         guard !hasAnswered(promptID: prompt.id, in: targetGroupID) else {
             errorMessage = "You've already answered today's Daily Blurb in this group. You can edit or delete it from the feed."
             return false
@@ -805,7 +845,8 @@ final class BlurbStore: ObservableObject {
                 Task { @MainActor in
                     guard self.listenerGeneration == generation else { return }
                     self.clearListenerError(source: "comments-\(post.id)")
-                    self.commentsByPostID[post.id] = comments
+                    self.unfilteredCommentsByPostID[post.id] = comments
+                    self.commentsByPostID[post.id] = comments.filter { !self.blockedUserIDs.contains($0.authorID) }
                 }
             }
     }
@@ -842,6 +883,10 @@ final class BlurbStore: ObservableObject {
         guard comment.authorID == currentUserID else { return false }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, trimmed.count <= 1000 else { return false }
+        guard ContentModeration.allows(trimmed) else {
+            errorMessage = ContentModeration.rejectionMessage
+            return false
+        }
         do {
             try await database.collection("posts").document(post.id).collection("comments")
                 .document(comment.id).updateData(["text": trimmed, "editedAt": FieldValue.serverTimestamp()])
@@ -869,6 +914,10 @@ final class BlurbStore: ObservableObject {
         guard let userID = currentUserID else { return false }
         let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return false }
+        guard ContentModeration.allows(text) else {
+            errorMessage = ContentModeration.rejectionMessage
+            return false
+        }
 
         let postReference = database.collection("posts").document(post.id)
         let commentReference = postReference.collection("comments").document()
@@ -896,6 +945,10 @@ final class BlurbStore: ObservableObject {
         guard let userID = currentUserID, post.authorID == userID else { return false }
         let trimmedAnswer = answer.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedAnswer.isEmpty || post.imageURL != nil else { return false }
+        guard ContentModeration.allows(trimmedAnswer) else {
+            errorMessage = ContentModeration.rejectionMessage
+            return false
+        }
         do {
             let changes: [String: Any] = [
                 "answer": trimmedAnswer,
@@ -920,6 +973,10 @@ final class BlurbStore: ObservableObject {
         }
         let trimmedAnswer = answer.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedAnswer.isEmpty || imageData != nil else { return false }
+        guard ContentModeration.allows(trimmedAnswer) else {
+            errorMessage = ContentModeration.rejectionMessage
+            return false
+        }
 
         do {
             var changes: [String: Any] = [
@@ -959,6 +1016,10 @@ final class BlurbStore: ObservableObject {
         guard let userID = currentUserID else { return false }
         let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else { return false }
+        guard ContentModeration.allows(name) else {
+            errorMessage = ContentModeration.rejectionMessage
+            return false
+        }
         do {
             var values: [String: Any] = ["displayName": name, "lastSeenAt": FieldValue.serverTimestamp(), "profileSetupCompleted": true]
             if let imageData {
@@ -993,6 +1054,94 @@ final class BlurbStore: ObservableObject {
         } catch {
             errorMessage = error.localizedDescription
             return false
+        }
+    }
+
+    var blockedUserIDs: Set<String> {
+        Set(blockedUsers.map(\.id))
+    }
+
+    func blockUser(id userID: String, displayName: String) async -> Bool {
+        guard let currentUserID, userID != currentUserID else { return false }
+        do {
+            try await database.collection("users").document(currentUserID)
+                .collection("blockedUsers").document(userID).setData([
+                    "displayName": displayName,
+                    "createdAt": FieldValue.serverTimestamp()
+                ])
+            return true
+        } catch {
+            errorMessage = error.localizedDescription
+            return false
+        }
+    }
+
+    func unblockUser(_ user: BlockedUser) async {
+        guard let currentUserID else { return }
+        do {
+            try await database.collection("users").document(currentUserID)
+                .collection("blockedUsers").document(user.id).delete()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func reportPost(_ post: BlurbPost, reason: String) async -> Bool {
+        await createReport(
+            reportedUserID: post.authorID,
+            groupID: post.groupID,
+            targetType: "post",
+            postID: post.id,
+            commentID: nil,
+            reason: reason
+        )
+    }
+
+    func reportComment(_ comment: BlurbComment, on post: BlurbPost, reason: String) async -> Bool {
+        await createReport(
+            reportedUserID: comment.authorID,
+            groupID: post.groupID,
+            targetType: "reply",
+            postID: post.id,
+            commentID: comment.id,
+            reason: reason
+        )
+    }
+
+    private func createReport(
+        reportedUserID: String,
+        groupID: String,
+        targetType: String,
+        postID: String,
+        commentID: String?,
+        reason: String
+    ) async -> Bool {
+        guard let currentUserID, reportedUserID != currentUserID else { return false }
+        var values: [String: Any] = [
+            "reporterID": currentUserID,
+            "reportedUserID": reportedUserID,
+            "groupID": groupID,
+            "targetType": targetType,
+            "postID": postID,
+            "reason": reason,
+            "status": "open",
+            "createdAt": FieldValue.serverTimestamp()
+        ]
+        if let commentID { values["commentID"] = commentID }
+        do {
+            try await database.collection("reports").document().setData(values)
+            return true
+        } catch {
+            errorMessage = error.localizedDescription
+            return false
+        }
+    }
+
+    private func applyBlockedContentFilter() {
+        let blocked = blockedUserIDs
+        posts = unfilteredPosts.filter { !blocked.contains($0.authorID) }
+        commentsByPostID = unfilteredCommentsByPostID.mapValues { comments in
+            comments.filter { !blocked.contains($0.authorID) }
         }
     }
 
@@ -1032,6 +1181,11 @@ final class BlurbStore: ObservableObject {
                 }
             }
 
+            let blockedUsers = try await database.collection("users").document(userID)
+                .collection("blockedUsers").getDocuments()
+            for blockedUser in blockedUsers.documents {
+                try await blockedUser.reference.delete()
+            }
             try? await Storage.storage().reference().child("profile-images/\(userID).jpg").delete()
             try await database.collection("users").document(userID).delete()
             return true
@@ -1046,7 +1200,11 @@ final class BlurbStore: ObservableObject {
         if isAppStoreScreenshotFixture { return }
 #endif
         postsListener?.remove()
-        guard let groupID = selectedGroupID, currentUserID != nil else { posts = []; return }
+        guard let groupID = selectedGroupID, currentUserID != nil else {
+            unfilteredPosts = []
+            posts = []
+            return
+        }
         let generation = listenerGeneration
         postsListener = database.collection("posts")
             .whereField("groupID", isEqualTo: groupID)
@@ -1067,7 +1225,8 @@ final class BlurbStore: ObservableObject {
                 Task { @MainActor in
                     guard self.listenerGeneration == generation else { return }
                     self.clearListenerError(source: "posts")
-                    self.posts = posts
+                    self.unfilteredPosts = posts
+                    self.applyBlockedContentFilter()
                 }
             }
     }

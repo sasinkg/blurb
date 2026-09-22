@@ -181,7 +181,7 @@ docs/                     GitHub Pages website and promotional assets
 
 ## Current status
 
-Daily Burb is an MVP under active development. The core group, prompt, profile, photo, authentication, and Firebase flows are implemented. Future work includes notification scheduling, richer monthly reports, moderation tools, accessibility testing, analytics, automated tests, and additional production hardening.
+Daily Burb is an MVP under active development. The core group, prompt, profile, photo, authentication, Firebase, and user-safety flows are implemented. Members can report answers and replies, block and unblock people, hide blocked content, and contact support from Settings. Future work includes richer server-assisted moderation, accessibility testing, analytics, automated tests, and additional production hardening.
 
 ## Built by
 

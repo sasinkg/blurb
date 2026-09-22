@@ -926,6 +926,15 @@ private struct GroupFeedView: View {
     }
 }
 
+private let moderationReportReasons = [
+    "Harassment or bullying",
+    "Hate speech",
+    "Sexual content",
+    "Violence or threats",
+    "Spam",
+    "Something else"
+]
+
 struct PostCard: View {
     @Environment(\.colorScheme) private var colorScheme
     @EnvironmentObject private var blurbStore: BlurbStore
@@ -936,6 +945,9 @@ struct PostCard: View {
     let deleteAnswer: (() -> Void)?
     let showComments: () -> Void
     @State private var showingPostEditor = false
+    @State private var showingReportReasons = false
+    @State private var showingBlockConfirmation = false
+    @State private var moderationNotice: String?
 
     private var previewComments: [BlurbComment] {
         Array((blurbStore.commentsByPostID[post.id] ?? []).prefix(2))
@@ -977,13 +989,21 @@ struct PostCard: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
 
-                if editAnswer != nil || deleteAnswer != nil {
+                if editAnswer != nil || deleteAnswer != nil || (!post.isSample && post.authorID != currentUserID) {
                     Menu {
                         if editAnswer != nil {
                             Button("Edit answer") { showingPostEditor = true }
                         }
                         if let deleteAnswer {
                             Button("Delete answer", role: .destructive, action: deleteAnswer)
+                        }
+                        if !post.isSample && post.authorID != currentUserID {
+                            Button("Report answer", systemImage: "exclamationmark.bubble") {
+                                showingReportReasons = true
+                            }
+                            Button("Block \(post.authorName)", systemImage: "person.slash", role: .destructive) {
+                                showingBlockConfirmation = true
+                            }
                         }
                     } label: {
                         Image(systemName: "ellipsis")
@@ -1121,7 +1141,45 @@ struct PostCard: View {
         .sheet(isPresented: $showingPostEditor) {
             PostAnswerEditor(post: post)
         }
+        .confirmationDialog("Why are you reporting this answer?", isPresented: $showingReportReasons, titleVisibility: .visible) {
+            ForEach(moderationReportReasons, id: \.self) { reason in
+                Button(reason) { reportPost(reason: reason) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Your report is private and will be reviewed.")
+        }
+        .confirmationDialog("Block \(post.authorName)?", isPresented: $showingBlockConfirmation, titleVisibility: .visible) {
+            Button("Block user", role: .destructive) {
+                Task {
+                    if await blurbStore.blockUser(id: post.authorID, displayName: post.authorName) {
+                        moderationNotice = "\(post.authorName) is blocked. Their answers and replies are now hidden."
+                    }
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Their answers and replies will be hidden. You can unblock them in Settings.")
+        }
+        .alert("Moderation", isPresented: Binding(
+            get: { moderationNotice != nil },
+            set: { if !$0 { moderationNotice = nil } }
+        )) {
+            Button("OK", role: .cancel) { moderationNotice = nil }
+        } message: {
+            Text(moderationNotice ?? "")
+        }
         .modifier(MemberProfileLinks(groupID: post.groupID))
+    }
+
+    private func reportPost(reason: String) {
+        Task {
+            if await blurbStore.reportPost(post, reason: reason) {
+                moderationNotice = "Thanks. Your report was submitted for review."
+            } else {
+                moderationNotice = blurbStore.errorMessage ?? "The report could not be submitted."
+            }
+        }
     }
 
     private var postMetadata: some View {
@@ -1719,7 +1777,11 @@ struct CommentsView: View {
 
 private struct CommentRow: View {
     @EnvironmentObject private var auth: AuthManager
+    @EnvironmentObject private var blurbStore: BlurbStore
     @State private var editing = false
+    @State private var showingReportReasons = false
+    @State private var showingBlockConfirmation = false
+    @State private var moderationNotice: String?
     let comment: BlurbComment
     let post: BlurbPost
     let accent: Color
@@ -1741,6 +1803,19 @@ private struct CommentRow: View {
                         Button { editing = true } label: { Image(systemName: "pencil") }
                             .buttonStyle(.plain)
                             .accessibilityLabel("Edit reply")
+                    } else {
+                        Menu {
+                            Button("Report reply", systemImage: "exclamationmark.bubble") {
+                                showingReportReasons = true
+                            }
+                            Button("Block \(comment.authorName)", systemImage: "person.slash", role: .destructive) {
+                                showingBlockConfirmation = true
+                            }
+                        } label: {
+                            Image(systemName: "ellipsis")
+                                .frame(width: 32, height: 32)
+                        }
+                        .accessibilityLabel("Reply options")
                     }
                     ReplyLikeButton(comment: comment, post: post)
                 }
@@ -1752,6 +1827,42 @@ private struct CommentRow: View {
         .padding(.vertical, 2)
         .padding(.vertical, 3)
         .sheet(isPresented: $editing) { EditReplyView(comment: comment, post: post) }
+        .confirmationDialog("Why are you reporting this reply?", isPresented: $showingReportReasons, titleVisibility: .visible) {
+            ForEach(moderationReportReasons, id: \.self) { reason in
+                Button(reason) {
+                    Task {
+                        if await blurbStore.reportComment(comment, on: post, reason: reason) {
+                            moderationNotice = "Thanks. Your report was submitted for review."
+                        } else {
+                            moderationNotice = blurbStore.errorMessage ?? "The report could not be submitted."
+                        }
+                    }
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Your report is private and will be reviewed.")
+        }
+        .confirmationDialog("Block \(comment.authorName)?", isPresented: $showingBlockConfirmation, titleVisibility: .visible) {
+            Button("Block user", role: .destructive) {
+                Task {
+                    if await blurbStore.blockUser(id: comment.authorID, displayName: comment.authorName) {
+                        moderationNotice = "\(comment.authorName) is blocked. Their answers and replies are now hidden."
+                    }
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Their answers and replies will be hidden. You can unblock them in Settings.")
+        }
+        .alert("Moderation", isPresented: Binding(
+            get: { moderationNotice != nil },
+            set: { if !$0 { moderationNotice = nil } }
+        )) {
+            Button("OK", role: .cancel) { moderationNotice = nil }
+        } message: {
+            Text(moderationNotice ?? "")
+        }
         .modifier(OwnReplyActions(comment: comment, post: post))
     }
 }
@@ -2438,6 +2549,33 @@ struct SettingsView: View {
                         settingsCard(title: "PRIVACY") {
                             Label("Only members of a group can see its blurbs.", systemImage: "lock.fill")
                                 .font(.subheadline)
+                                .foregroundStyle(.secondary)
+
+                            if !blurbStore.blockedUsers.isEmpty {
+                                Divider()
+                                Text("BLOCKED USERS")
+                                    .font(.caption.bold())
+                                    .foregroundStyle(.secondary)
+                                ForEach(blurbStore.blockedUsers) { user in
+                                    HStack {
+                                        Label(user.displayName, systemImage: "person.slash")
+                                        Spacer()
+                                        Button("Unblock") {
+                                            Task { await blurbStore.unblockUser(user) }
+                                        }
+                                        .font(.caption.bold())
+                                    }
+                                }
+                            }
+                        }
+
+                        settingsCard(title: "SUPPORT") {
+                            Link(destination: URL(string: "mailto:sasingudipati@gmail.com")!) {
+                                Label("sasingudipati@gmail.com", systemImage: "envelope.fill")
+                                    .font(.subheadline.bold())
+                            }
+                            Text("Contact support for help, safety concerns, or account questions.")
+                                .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
 
@@ -3208,6 +3346,9 @@ private struct OwnReplyActions: ViewModifier {
     @EnvironmentObject private var auth: AuthManager
     @EnvironmentObject private var blurbStore: BlurbStore
     @State private var confirmingDelete = false
+    @State private var showingReportReasons = false
+    @State private var showingBlockConfirmation = false
+    @State private var moderationNotice: String?
     let comment: BlurbComment
     let post: BlurbPost
     func body(content: Content) -> some View {
@@ -3221,6 +3362,11 @@ private struct OwnReplyActions: ViewModifier {
             .contextMenu {
                 if comment.authorID == auth.user?.uid {
                     Button("Delete reply", systemImage: "trash", role: .destructive) { confirmingDelete = true }
+                } else {
+                    Button("Report reply", systemImage: "exclamationmark.bubble") { showingReportReasons = true }
+                    Button("Block \(comment.authorName)", systemImage: "person.slash", role: .destructive) {
+                        showingBlockConfirmation = true
+                    }
                 }
             }
             .confirmationDialog("Delete your reply?", isPresented: $confirmingDelete, titleVisibility: .visible) {
@@ -3228,6 +3374,36 @@ private struct OwnReplyActions: ViewModifier {
                     Task { await blurbStore.deleteComment(comment, on: post) }
                 }
                 Button("Cancel", role: .cancel) {}
+            }
+            .confirmationDialog("Why are you reporting this reply?", isPresented: $showingReportReasons, titleVisibility: .visible) {
+                ForEach(moderationReportReasons, id: \.self) { reason in
+                    Button(reason) {
+                        Task {
+                            if await blurbStore.reportComment(comment, on: post, reason: reason) {
+                                moderationNotice = "Thanks. Your report was submitted for review."
+                            }
+                        }
+                    }
+                }
+                Button("Cancel", role: .cancel) {}
+            }
+            .confirmationDialog("Block \(comment.authorName)?", isPresented: $showingBlockConfirmation, titleVisibility: .visible) {
+                Button("Block user", role: .destructive) {
+                    Task {
+                        _ = await blurbStore.blockUser(id: comment.authorID, displayName: comment.authorName)
+                    }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Their answers and replies will be hidden. You can unblock them in Settings.")
+            }
+            .alert("Moderation", isPresented: Binding(
+                get: { moderationNotice != nil },
+                set: { if !$0 { moderationNotice = nil } }
+            )) {
+                Button("OK", role: .cancel) { moderationNotice = nil }
+            } message: {
+                Text(moderationNotice ?? "")
             }
     }
 }

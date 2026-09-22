@@ -64,4 +64,11 @@ struct blurbTests {
             }
         }
     }
+
+    @Test func objectionableLanguageFilterBlocksExactTermsAndThreatsWithoutSubstringFalsePositives() {
+        #expect(ContentModeration.allows("That fire-retardant jacket worked."))
+        #expect(ContentModeration.allows("We had a ridiculous, wonderful day."))
+        #expect(!ContentModeration.allows("You should die"))
+        #expect(!ContentModeration.allows("What a faggot"))
+    }
 }

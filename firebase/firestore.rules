@@ -46,6 +46,12 @@ service cloud.firestore {
         allow read: if signedIn() && request.auth.uid == userID;
         allow write: if false;
       }
+
+      match /blockedUsers/{blockedUserID} {
+        allow read, create, update, delete: if signedIn()
+          && request.auth.uid == userID
+          && blockedUserID != request.auth.uid;
+      }
     }
 
     match /groups/{groupID} {
@@ -169,6 +175,34 @@ service cloud.firestore {
     match /newsletterEditions/{editionID} {
       allow read: if signedIn() && request.auth.uid in resource.data.viewerIDs;
       allow write: if false;
+    }
+
+    match /reports/{reportID} {
+      // Reports are write-only for clients. Review and status changes happen
+      // through the Firebase console or trusted server tooling.
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly([
+          'reporterID', 'reportedUserID', 'groupID', 'targetType',
+          'postID', 'commentID', 'reason', 'status', 'createdAt'
+        ])
+        && request.resource.data.reporterID == request.auth.uid
+        && request.resource.data.reportedUserID is string
+        && request.resource.data.reportedUserID != request.auth.uid
+        && request.resource.data.groupID is string
+        && isGroupMember(request.resource.data.groupID)
+        && request.resource.data.targetType in ['post', 'reply']
+        && request.resource.data.postID is string
+        && exists(/databases/$(database)/documents/posts/$(request.resource.data.postID))
+        && get(/databases/$(database)/documents/posts/$(request.resource.data.postID)).data.groupID
+          == request.resource.data.groupID
+        && request.resource.data.reason is string
+        && request.resource.data.reason.size() > 0
+        && request.resource.data.reason.size() <= 100
+        && request.resource.data.status == 'open'
+        && request.resource.data.createdAt == request.time
+        && (request.resource.data.targetType == 'post'
+          || request.resource.data.commentID is string);
+      allow read, update, delete: if false;
     }
   }
 }
