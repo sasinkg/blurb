@@ -46,6 +46,7 @@ struct ArchivedNewsletterView: View {
                         .padding(.vertical, 36)
                     }
                     winners
+                    locations
                     answers
                     photos
 
@@ -101,6 +102,16 @@ struct ArchivedNewsletterView: View {
             .padding(16)
             .background(Color.white.opacity(0.42))
             .overlay { Rectangle().stroke(.black, lineWidth: 1.5) }
+        }
+    }
+
+    @ViewBuilder
+    private var locations: some View {
+        if !edition.stats.cities.isEmpty {
+            VStack(alignment: .leading, spacing: 12) {
+                sectionTitle("THE MONTH ON THE MAP")
+                MonthlyCityMap(cities: edition.stats.cities)
+            }
         }
     }
 

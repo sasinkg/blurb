@@ -20,6 +20,22 @@ service cloud.firestore {
         && get(/databases/$(database)/documents/groups/$(groupID)).data.ownerID == request.auth.uid;
     }
 
+    function hasValidCityLocation(data) {
+      return !('cityLocation' in data) || (
+        data.cityLocation is map
+        && data.cityLocation.keys().hasOnly(['city', 'region', 'countryCode'])
+        && data.cityLocation.city is string
+        && data.cityLocation.city.size() > 0
+        && data.cityLocation.city.size() <= 100
+        && (!('region' in data.cityLocation) || (
+          data.cityLocation.region is string && data.cityLocation.region.size() <= 100
+        ))
+        && (!('countryCode' in data.cityLocation) || (
+          data.cityLocation.countryCode is string && data.cityLocation.countryCode.size() <= 3
+        ))
+      );
+    }
+
     match /users/{userID} {
       allow read, create, update, delete: if signedIn() && request.auth.uid == userID;
 
@@ -80,7 +96,8 @@ service cloud.firestore {
       allow read: if isGroupMember(resource.data.groupID);
       allow create: if isGroupMember(request.resource.data.groupID)
         && request.auth.uid == request.resource.data.authorID
-        && request.auth.uid in request.resource.data.viewerIDs;
+        && request.auth.uid in request.resource.data.viewerIDs
+        && hasValidCityLocation(request.resource.data);
       allow update: if isGroupMember(resource.data.groupID)
         && request.resource.data.groupID == resource.data.groupID
         && (

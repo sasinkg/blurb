@@ -9,6 +9,7 @@ initializeApp();
 
 const {notificationRecipients} = require("./mentions");
 const {localDateKey, unansweredMemberIDs} = require("./socialNudges");
+const {aggregateCities, normalizeCityLocation} = require("./cityLocations");
 const {
   buildSelection,
   photoMonthKey,
@@ -221,8 +222,11 @@ exports.generateMonthlyNewsletters = onSchedule(
         let photoCount = 0;
         let mostLiked = null;
         let mostCommented = null;
+        const cityLocations = [];
         for (const document of monthPosts) {
           const post = document.data();
+          const cityLocation = normalizeCityLocation(post.cityLocation);
+          if (cityLocation) cityLocations.push(cityLocation);
           totals[post.authorName] = (totals[post.authorName] ?? 0) + (post.pointsAwarded ?? 0);
           counts[post.authorName] = (counts[post.authorName] ?? 0) + 1;
           if (post.imageURL) photoCount += 1;
@@ -240,6 +244,11 @@ exports.generateMonthlyNewsletters = onSchedule(
             prompt: post.prompt ?? "",
             promptID: post.promptID ?? "",
             imageURL: post.imageURL ?? null,
+            cityLocation: cityLocation ? {
+              city: cityLocation.city,
+              region: cityLocation.region,
+              countryCode: cityLocation.countryCode,
+            } : null,
             pollOptions: post.pollOptions ?? [],
             createdAt: post.createdAt,
             pointsAwarded: post.pointsAwarded ?? 0,
@@ -291,6 +300,7 @@ exports.generateMonthlyNewsletters = onSchedule(
                 groupMemberCount: (group.memberIDs ?? []).length,
                 mostLiked,
                 mostCommented,
+                cities: aggregateCities(cityLocations),
               },
             });
       }

@@ -981,6 +981,11 @@ struct PostCard: View {
             }
             Text(post.timeLabel)
                 .foregroundStyle(.secondary)
+            if let city = post.cityLocation {
+                Label(city.city, systemImage: "mappin.and.ellipse")
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel("Posted from \(city.city)")
+            }
         }
         .font(.caption2)
         .fixedSize(horizontal: true, vertical: false)
@@ -1459,6 +1464,11 @@ struct CommentsView: View {
                                     Text(post.timeLabel)
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
+                                    if let city = post.cityLocation {
+                                        Label(city.city, systemImage: "mappin.and.ellipse")
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                    }
                                 }
                             }
                             Text(mentionText(post.answer))
@@ -2157,6 +2167,7 @@ struct SettingsView: View {
     @EnvironmentObject private var blurbStore: BlurbStore
     @AppStorage("dailyReminderEnabled") private var dailyReminderEnabled = false
     @AppStorage("replyNotificationsEnabled") private var replyNotificationsEnabled = false
+    @AppStorage("cityLocationEnabled") private var cityLocationEnabled = false
     @AppStorage("weeklyTriviaEnabled") private var weeklyTriviaEnabled = true
     @AppStorage("monthlyReportEnabled") private var monthlyReportEnabled = true
     @AppStorage("appAppearance") private var appAppearance = AppAppearance.system.rawValue
@@ -2168,6 +2179,7 @@ struct SettingsView: View {
     @State private var showingDeleteAccount = false
     @State private var isDeletingAccount = false
     @State private var reminderErrorMessage: String?
+    @State private var currentCityName: String?
 
     var body: some View {
         NavigationStack {
@@ -2246,6 +2258,16 @@ struct SettingsView: View {
                                 .onChange(of: replyNotificationsEnabled) { _, enabled in
                                     updateReplyNotifications(enabled: enabled)
                                 }
+                        }
+
+                        settingsCard(title: "BLURB MAP") {
+                            Toggle("Show my city on new Blurbs", isOn: $cityLocationEnabled)
+                                .onChange(of: cityLocationEnabled) { _, enabled in
+                                    updateCityLocation(enabled: enabled)
+                                }
+                            Text(currentCityName.map { "New Blurbs will show \($0)." } ?? "Optional and off by default. Daily Blurb converts your location to city, region, and country on your phone; precise coordinates are never saved.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
 
                         settingsCard(title: "REPORTS") {
@@ -2342,7 +2364,7 @@ struct SettingsView: View {
             } message: {
                 Text("This removes your profile, photos, answers, and group memberships. This cannot be undone.")
             }
-            .alert("Daily reminder", isPresented: Binding(
+            .alert("Settings", isPresented: Binding(
                 get: { reminderErrorMessage != nil },
                 set: { if !$0 { reminderErrorMessage = nil } }
             )) {
@@ -2363,6 +2385,10 @@ struct SettingsView: View {
                 if !restored {
                     replyNotificationsEnabled = false
                 }
+            }
+            .task {
+                guard cityLocationEnabled else { return }
+                currentCityName = await CityLocationProvider.shared.currentCity()?.displayName
             }
         }
     }
@@ -2393,6 +2419,21 @@ struct SettingsView: View {
             } catch {
                 replyNotificationsEnabled = false
                 reminderErrorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func updateCityLocation(enabled: Bool) {
+        guard enabled else {
+            currentCityName = nil
+            return
+        }
+        Task {
+            if let city = await CityLocationProvider.shared.currentCity() {
+                currentCityName = city.displayName
+            } else {
+                cityLocationEnabled = false
+                reminderErrorMessage = "City sharing needs Location access. Enable it in iPhone Settings, then try again."
             }
         }
     }

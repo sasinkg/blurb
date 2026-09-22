@@ -44,7 +44,8 @@ struct GroupNewsletterHomeView: View {
                     prompt: $0.isSample ? ExampleGroupContent.question : $0.prompt,
                     promptID: $0.isSample ? "review-example-samples" : $0.promptID,
                     imageURL: $0.imageURL,
-                    createdAt: $0.createdAt
+                    createdAt: $0.createdAt,
+                    cityLocation: $0.cityLocation
                 )
             }
         let counts = Dictionary(grouping: currentPosts, by: \.authorName).mapValues(\.count)

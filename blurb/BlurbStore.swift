@@ -39,6 +39,7 @@ struct BlurbPost: Identifiable, Hashable {
     let answerRank: Int
     let pointsAwarded: Int
     let commentCount: Int
+    var cityLocation: BlurbCityLocation? = nil
     var isSample = false
 
     var likeCount: Int { likeIDs.count }
@@ -90,6 +91,7 @@ struct NewsletterEntry: Identifiable, Hashable {
     let promptID: String
     let imageURL: String?
     let createdAt: Date
+    var cityLocation: BlurbCityLocation? = nil
 }
 
 struct NewsletterEdition: Identifiable, Hashable {
@@ -112,7 +114,21 @@ struct MonthlyWrappedStats: Hashable {
     var groupMemberCount = 0
     var mostLiked: WrappedHighlight?
     var mostCommented: WrappedHighlight?
+    var cities: [WrappedCityCount] = []
     static let empty = MonthlyWrappedStats()
+}
+
+struct WrappedCityCount: Identifiable, Hashable {
+    let city: String
+    let region: String?
+    let countryCode: String?
+    let count: Int
+
+    var id: String { "\(city.lowercased())|\(region?.lowercased() ?? "")|\(countryCode ?? "")" }
+    var displayName: String {
+        guard let region, !region.isEmpty else { return city }
+        return "\(city), \(region)"
+    }
 }
 
 struct WrappedHighlight: Hashable {
@@ -728,6 +744,10 @@ final class BlurbStore: ObservableObject {
                 sharedValues["viewerIDs"] = group.memberIDs
             }
             if let photoURL = profile.photoURL { sharedValues["authorPhotoURL"] = photoURL }
+            if UserDefaults.standard.bool(forKey: "cityLocationEnabled"),
+               let city = await CityLocationProvider.shared.currentCity() {
+                sharedValues["cityLocation"] = city.firestoreData
+            }
 
             if let imageData {
                 let imageReference = Storage.storage().reference()
@@ -1163,6 +1183,7 @@ final class BlurbStore: ObservableObject {
             answerRank: data["answerRank"] as? Int ?? 0,
             pointsAwarded: data["pointsAwarded"] as? Int ?? 0,
             commentCount: data["commentCount"] as? Int ?? 0,
+            cityLocation: (data["cityLocation"] as? [String: Any]).flatMap(BlurbCityLocation.init),
             isSample: data["isSample"] as? Bool ?? false
         )
     }
@@ -1216,13 +1237,18 @@ final class BlurbStore: ObservableObject {
                 prompt: prompt,
                 promptID: entry["promptID"] as? String ?? postID,
                 imageURL: entry["imageURL"] as? String,
-                createdAt: (entry["createdAt"] as? Timestamp)?.dateValue() ?? .now
+                createdAt: (entry["createdAt"] as? Timestamp)?.dateValue() ?? .now,
+                cityLocation: (entry["cityLocation"] as? [String: Any]).flatMap(BlurbCityLocation.init)
             )
         }
         let winners = data["winners"] as? [String: Any]
         let mostAnswers = winners?["mostAnswers"] as? [String: Any]
         let mostPoints = winners?["mostPoints"] as? [String: Any]
         let stats = data["stats"] as? [String: Any] ?? [:]
+        let cities = (stats["cities"] as? [[String: Any]] ?? []).compactMap { value -> WrappedCityCount? in
+            guard let city = value["city"] as? String, let count = value["count"] as? Int else { return nil }
+            return WrappedCityCount(city: city, region: value["region"] as? String, countryCode: value["countryCode"] as? String, count: count)
+        }
         func highlight(_ key: String) -> WrappedHighlight? {
             guard let value = stats[key] as? [String: Any], let postID = value["postID"] as? String else { return nil }
             return WrappedHighlight(postID: postID, authorName: value["authorName"] as? String ?? "Blurb friend", prompt: value["prompt"] as? String ?? "", answer: value["answer"] as? String ?? "", value: value["value"] as? Int ?? 0)
@@ -1242,7 +1268,7 @@ final class BlurbStore: ObservableObject {
                 photoCount: stats["photoCount"] as? Int ?? entries.filter { $0.imageURL != nil }.count,
                 participatingMemberCount: stats["participatingMemberCount"] as? Int ?? 0,
                 groupMemberCount: stats["groupMemberCount"] as? Int ?? 0,
-                mostLiked: highlight("mostLiked"), mostCommented: highlight("mostCommented")
+                mostLiked: highlight("mostLiked"), mostCommented: highlight("mostCommented"), cities: cities
             )
         )
     }

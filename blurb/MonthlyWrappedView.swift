@@ -16,6 +16,7 @@ struct MonthlyWrappedView: View {
         if let winner = edition.mostPointsWinner { result.append(.winner("Most points won", winner, "star.fill")) }
         if let item = stats.mostLiked, item.value > 0 { result.append(.highlight("Most liked", item, "heart.fill")) }
         if let item = stats.mostCommented, item.value > 0 { result.append(.highlight("Most discussed", item, "bubble.left.and.bubble.right.fill")) }
+        if !stats.cities.isEmpty { result.append(.locations(stats.cities)) }
         let answers = edition.entries.filter { $0.imageURL == nil && !$0.answer.isEmpty }
         let questions = Dictionary(grouping: answers, by: \.promptID).values
             .compactMap { responses -> (NewsletterEntry, [NewsletterEntry])? in
@@ -154,6 +155,12 @@ struct MonthlyWrappedView: View {
                         }
                     }
                 }
+            case let .locations(cities):
+                sectionLabel("BLURB MAP")
+                Text("Where the group posted from").font(.system(size: 30, weight: .black, design: .serif)).multilineTextAlignment(.center)
+                ScrollView {
+                    MonthlyCityMap(cities: cities, interactive: false)
+                }
             case .final:
                 WrappedNewspaperPage(edition: edition, accent: accent)
             }
@@ -229,6 +236,12 @@ private struct WrappedNewspaperPage: View {
                         if let winner = edition.mostAnswersWinner { Text("Most answers — **\(winner)**") }
                         if let winner = edition.mostPointsWinner { Text("Points leader — **\(winner)**") }
                     }.font(.system(.caption, design: .serif)).padding(12).overlay { Rectangle().stroke(.black, lineWidth: 1.5) }
+                }
+                if !edition.stats.cities.isEmpty {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("THE MONTH ON THE MAP").font(.caption.weight(.black)).tracking(1).padding(5).background(accent)
+                        MonthlyCityMap(cities: edition.stats.cities, interactive: false)
+                    }
                 }
                 LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], alignment: .leading, spacing: 14) {
                     ForEach(Array(questions.enumerated()), id: \.offset) { index, question in
@@ -314,7 +327,7 @@ private struct WrappedShareImage: Transferable {
 }
 
 private enum WrappedSlide {
-    case intro, stats, winner(String, String, String), highlight(String, WrappedHighlight, String), question(String, [NewsletterEntry]), photoGroup(String, [NewsletterEntry]), final
+    case intro, stats, winner(String, String, String), highlight(String, WrappedHighlight, String), question(String, [NewsletterEntry]), photoGroup(String, [NewsletterEntry]), locations([WrappedCityCount]), final
 }
 
 enum MonthlyWrappedDemo {
@@ -346,7 +359,12 @@ enum MonthlyWrappedDemo {
                 answerCount: 16, questionCount: 4, photoCount: 8,
                 participatingMemberCount: 4, groupMemberCount: 4,
                 mostLiked: WrappedHighlight(postID: entries[0].id, authorName: name, prompt: entries[0].prompt, answer: entries[0].answer, value: 18),
-                mostCommented: WrappedHighlight(postID: entries[5].id, authorName: "Maya", prompt: entries[5].prompt, answer: entries[5].answer, value: 11)
+                mostCommented: WrappedHighlight(postID: entries[5].id, authorName: "Maya", prompt: entries[5].prompt, answer: entries[5].answer, value: 11),
+                cities: [
+                    WrappedCityCount(city: "Oakland", region: "CA", countryCode: "US", count: 7),
+                    WrappedCityCount(city: "Seattle", region: "WA", countryCode: "US", count: 5),
+                    WrappedCityCount(city: "Brooklyn", region: "NY", countryCode: "US", count: 4)
+                ]
             )
         )
     }
