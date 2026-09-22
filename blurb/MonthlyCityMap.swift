@@ -15,6 +15,9 @@ struct MonthlyCityMap: View {
     @State private var settledZoom: CGFloat = 1
     @State private var pan: CGSize = .zero
     @State private var settledPan: CGSize = .zero
+    @State private var fittedZoom: CGFloat = 1
+    @State private var fittedPan: CGSize = .zero
+    @State private var viewportSize: CGSize = .zero
 
     var body: some View {
         GeometryReader { geometry in
@@ -47,9 +50,17 @@ struct MonthlyCityMap: View {
             .simultaneousGesture(zoomGesture)
             .onTapGesture(count: 2) {
                 guard interactive else { return }
-                resetWorld()
+                resetToRelevantCities()
             }
             .allowsHitTesting(interactive)
+            .onAppear {
+                viewportSize = size
+                fitMap(to: pins, in: size, animated: false)
+            }
+            .onChange(of: size) { _, newSize in
+                viewportSize = newSize
+                fitMap(to: pins, in: newSize, animated: false)
+            }
         }
         .frame(maxWidth: .infinity)
         .aspectRatio(2.16, contentMode: .fit)
@@ -83,12 +94,59 @@ struct MonthlyCityMap: View {
             }
     }
 
-    private func resetWorld() {
+    private func resetToRelevantCities() {
         withAnimation(.spring(response: 0.3)) {
-            zoom = 1
-            settledZoom = 1
-            pan = .zero
-            settledPan = .zero
+            zoom = fittedZoom
+            settledZoom = fittedZoom
+            pan = fittedPan
+            settledPan = fittedPan
+        }
+    }
+
+    private func fitMap(to mapPins: [CityMapPin], in size: CGSize, animated: Bool) {
+        guard size.width > 0, size.height > 0, !mapPins.isEmpty else {
+            fittedZoom = 1
+            fittedPan = .zero
+            return
+        }
+
+        let points = mapPins.map {
+            WorldMapProjection.point(
+                longitude: CGFloat($0.coordinate.longitude),
+                latitude: CGFloat($0.coordinate.latitude),
+                in: CGRect(origin: .zero, size: size)
+            )
+        }
+        let minX = points.map(\.x).min() ?? size.width / 2
+        let maxX = points.map(\.x).max() ?? size.width / 2
+        let minY = points.map(\.y).min() ?? size.height / 2
+        let maxY = points.map(\.y).max() ?? size.height / 2
+        let spanX = max(maxX - minX, 1)
+        let spanY = max(maxY - minY, 1)
+        let edgePadding: CGFloat = 54
+        let availableWidth = max(size.width - edgePadding * 2, 1)
+        let availableHeight = max(size.height - edgePadding * 2, 1)
+        let targetZoom = min(max(min(availableWidth / spanX, availableHeight / spanY), 1), 4.8)
+        let center = CGPoint(x: (minX + maxX) / 2, y: (minY + maxY) / 2)
+        let targetPan = CGSize(
+            width: (size.width / 2 - center.x) * targetZoom,
+            height: (size.height / 2 - center.y) * targetZoom
+        )
+
+        fittedZoom = targetZoom
+        fittedPan = targetPan
+        let update = {
+            zoom = targetZoom
+            settledZoom = targetZoom
+            pan = targetPan
+            settledPan = targetPan
+        }
+        if animated {
+            withAnimation(.spring(response: 0.45, dampingFraction: 0.86)) {
+                update()
+            }
+        } else {
+            update()
         }
     }
 
@@ -114,6 +172,7 @@ struct MonthlyCityMap: View {
             }
         }
         pins = resolved
+        fitMap(to: resolved, in: viewportSize, animated: true)
     }
 }
 
