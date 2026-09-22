@@ -57,6 +57,7 @@ struct DemoMonthlyNewsletterView: View {
                     masthead
                     opening
                     winnersSection
+                    mapSection
                     reflectionSection
                     photoSection
                     closing
@@ -115,7 +116,8 @@ struct DemoMonthlyNewsletterView: View {
             HStack(spacing: 0) {
                 newsletterStat("4", "PEOPLE")
                 newsletterStat("16", "ANSWERS")
-                newsletterStat("2", "PHOTOS")
+                newsletterStat("8", "PHOTOS")
+                newsletterStat("3", "CITIES")
             }
             .overlay { Rectangle().stroke(.black, lineWidth: 1.5) }
         }
@@ -209,6 +211,17 @@ struct DemoMonthlyNewsletterView: View {
         .padding(.bottom, 30)
     }
 
+    private var mapSection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            sectionTitle("THE MONTH ON THE MAP", subtitle: "WHERE WE POSTED")
+            Text("From familiar corners to weekends away, these are the cities behind this month’s stories.")
+                .font(.system(.caption, design: .serif))
+                .foregroundStyle(.secondary)
+            MonthlyCityMap(cities: demoCities)
+        }
+        .padding(.bottom, 30)
+    }
+
     private var closing: some View {
         VStack(alignment: .leading, spacing: 14) {
             Rectangle().frame(height: 3)
@@ -253,6 +266,14 @@ struct DemoMonthlyNewsletterView: View {
 
     private var firstName: String {
         displayName.split(separator: " ").first.map(String.init) ?? "Your"
+    }
+
+    private var demoCities: [WrappedCityCount] {
+        [
+            WrappedCityCount(city: "Oakland", region: "CA", countryCode: "US", count: 7),
+            WrappedCityCount(city: "Seattle", region: "WA", countryCode: "US", count: 5),
+            WrappedCityCount(city: "Brooklyn", region: "NY", countryCode: "US", count: 4)
+        ]
     }
 
     private var photoHighlights: [DemoPhotoHighlight] {
