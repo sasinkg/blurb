@@ -2,6 +2,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct MonthlyWrappedView: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let edition: NewsletterEdition
     @State private var page = 0
     @State private var shareCard: WrappedShareImage?
@@ -39,10 +40,15 @@ struct MonthlyWrappedView: View {
         GeometryReader { geometry in
             ZStack {
                 paper.ignoresSafeArea()
-                slide(slides[min(page, slides.count - 1)])
-                    .id(page)
-                    .transition(.opacity.combined(with: .scale(scale: 0.98)))
-                    .padding(24)
+                TabView(selection: $page) {
+                    ForEach(slides.indices, id: \.self) { index in
+                        slide(slides[index])
+                            .padding(24)
+                            .tag(index)
+                    }
+                }
+                .tabViewStyle(.page(indexDisplayMode: .never))
+
                 HStack(spacing: 5) {
                     ForEach(slides.indices, id: \.self) { index in
                         Capsule().fill(index <= page ? .black : .black.opacity(0.18)).frame(height: 4)
@@ -51,6 +57,7 @@ struct MonthlyWrappedView: View {
                 .padding(.horizontal, 16)
                 .frame(maxHeight: .infinity, alignment: .top)
                 .padding(.top, 8)
+                .animation(reduceMotion ? nil : BlurbMotion.quick, value: page)
             }
             .contentShape(Rectangle())
             .simultaneousGesture(
@@ -76,7 +83,13 @@ struct MonthlyWrappedView: View {
     }
 
     private func move(_ offset: Int) {
-        withAnimation(.easeInOut(duration: 0.2)) { page = min(max(page + offset, 0), slides.count - 1) }
+        let newPage = min(max(page + offset, 0), slides.count - 1)
+        guard newPage != page else { return }
+        if reduceMotion {
+            page = newPage
+        } else {
+            withAnimation(BlurbMotion.page) { page = newPage }
+        }
     }
 
     @MainActor private func renderShareCard() {
@@ -146,7 +159,7 @@ struct MonthlyWrappedView: View {
                                         .aspectRatio(4.0 / 5.0, contentMode: .fill).clipped()
                                         .overlay { Rectangle().stroke(.black, lineWidth: 2) }
                                 } else {
-                                    AsyncImage(url: URL(string: entry.imageURL ?? "")) { $0.resizable().scaledToFill() } placeholder: { Rectangle().fill(.quaternary) }
+                                    BlurbAsyncImage(url: URL(string: entry.imageURL ?? "")) { $0.resizable().scaledToFill() } placeholder: { Rectangle().fill(.quaternary) }
                                         .aspectRatio(4.0 / 5.0, contentMode: .fit).clipped().overlay { Rectangle().stroke(.black, lineWidth: 2) }
                                 }
                                 if !entry.answer.isEmpty { Text(entry.answer).font(.system(.caption, design: .serif).bold()) }
@@ -267,7 +280,7 @@ private struct WrappedNewspaperPage: View {
                                         DemoWrappedPhoto(url: entry.imageURL ?? "")
                                             .aspectRatio(4.0 / 3.0, contentMode: .fill).clipped()
                                     } else {
-                                        AsyncImage(url: URL(string: entry.imageURL ?? "")) { $0.resizable().scaledToFill() } placeholder: { Rectangle().fill(.quaternary) }
+                                        BlurbAsyncImage(url: URL(string: entry.imageURL ?? "")) { $0.resizable().scaledToFill() } placeholder: { Rectangle().fill(.quaternary) }
                                             .aspectRatio(4.0 / 3.0, contentMode: .fit).clipped()
                                     }
                                     Text(entry.answer).font(.system(size: 9, weight: .bold, design: .serif))

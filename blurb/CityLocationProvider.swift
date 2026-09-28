@@ -60,6 +60,11 @@ final class CityLocationProvider: NSObject, @preconcurrency CLLocationManagerDel
         }
     }
 
+    func refreshCity() async -> BlurbCityLocation? {
+        cachedResult = nil
+        return await currentCity()
+    }
+
     private func beginRequest() {
         switch manager.authorizationStatus {
         case .notDetermined:

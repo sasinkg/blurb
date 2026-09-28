@@ -18,6 +18,26 @@ struct BlurbGroup: Identifiable, Hashable {
     var displayedParticipantCount: Int { memberCount + sampleParticipantCount }
 }
 
+struct GroupNewsletterQuestion: Identifiable, Hashable {
+    let id: String
+    let groupID: String
+    let monthKey: String
+    let promptID: String
+    let question: String
+    let authorID: String
+    let authorName: String
+    let createdAt: Date
+
+    var prompt: DailyPrompt {
+        DailyPrompt(
+            id: promptID,
+            question: question,
+            kind: .featured,
+            isNewsletterFeature: true
+        )
+    }
+}
+
 struct BlurbPost: Identifiable, Hashable {
     let id: String
     let entryID: String
@@ -150,6 +170,7 @@ final class BlurbStore: ObservableObject {
     @Published private(set) var groupsLoaded = false
     @Published private(set) var posts: [BlurbPost] = []
     @Published private(set) var answerCountsByGroup: [String: Int] = [:]
+    @Published private(set) var answeringMemberIDsByGroup: [String: Set<String>] = [:]
     @Published private(set) var myAnswerStatusByGroup: [String: Bool] = [:]
     @Published private(set) var profile = BlurbProfile()
     @Published private(set) var profileLoaded = false
@@ -158,6 +179,7 @@ final class BlurbStore: ObservableObject {
     @Published private(set) var blockedUsers: [BlockedUser] = []
     @Published private(set) var newsletterEditions: [NewsletterEdition] = []
     @Published private(set) var photoOfMonthSelections: [String: PhotoOfMonthSelection] = [:]
+    @Published private(set) var photoOfMonthSelectionsLoaded = false
     @Published var selectedGroupID: String?
     @Published var errorMessage: String?
     @Published private(set) var listenerErrorMessage: String?
@@ -292,11 +314,88 @@ final class BlurbStore: ObservableObject {
                 .whereField("promptID", isEqualTo: promptID)
                 .whereField("authorID", isEqualTo: userID)
                 .limit(to: 1)
-                .getDocuments()
+                .getDocuments(source: .server)
             return snapshot.documents.first.flatMap { Self.makePost($0) }
         } catch {
             errorMessage = error.localizedDescription
             return nil
+        }
+    }
+
+    func loadCustomNewsletterQuestions(in groupID: String, date: Date = .now) async -> [GroupNewsletterQuestion] {
+        guard groups.contains(where: { $0.id == groupID }) else { return [] }
+        let monthKey = Self.photoMonthKey(date: date)
+        do {
+            let snapshot = try await database.collection("groups").document(groupID)
+                .collection("newsletterQuestions")
+                .whereField("monthKey", isEqualTo: monthKey)
+                .getDocuments(source: .server)
+            return snapshot.documents.compactMap { document in
+                let data = document.data()
+                guard let question = data["question"] as? String,
+                      let authorID = data["authorID"] as? String else { return nil }
+                return GroupNewsletterQuestion(
+                    id: document.documentID,
+                    groupID: groupID,
+                    monthKey: data["monthKey"] as? String ?? monthKey,
+                    promptID: data["promptID"] as? String
+                        ?? "newsletter-custom-\(monthKey)-\(document.documentID)",
+                    question: question,
+                    authorID: authorID,
+                    authorName: data["authorName"] as? String ?? "A group member",
+                    createdAt: (data["createdAt"] as? Timestamp)?.dateValue() ?? .now
+                )
+            }
+            .sorted {
+                if $0.createdAt == $1.createdAt { return $0.id < $1.id }
+                return $0.createdAt < $1.createdAt
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+            return []
+        }
+    }
+
+    func addCustomNewsletterQuestion(
+        _ rawQuestion: String,
+        to groupID: String,
+        date: Date = .now
+    ) async -> Bool {
+        guard let userID = currentUserID,
+              groups.contains(where: { $0.id == groupID }) else {
+            errorMessage = "You must be a member of this group to add a question."
+            return false
+        }
+        let question = rawQuestion.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !question.isEmpty else { return false }
+        guard question.count <= 180 else {
+            errorMessage = "Keep the question under 180 characters."
+            return false
+        }
+        guard ContentModeration.allows(question) else {
+            errorMessage = ContentModeration.rejectionMessage
+            return false
+        }
+
+        let monthKey = Self.photoMonthKey(date: date)
+        let reference = database.collection("groups").document(groupID)
+            .collection("newsletterQuestions").document()
+        let promptID = "newsletter-custom-\(monthKey)-\(reference.documentID)"
+        do {
+            try await reference.setData([
+                "groupID": groupID,
+                "monthKey": monthKey,
+                "promptID": promptID,
+                "question": question,
+                "authorID": userID,
+                "authorName": profile.displayName,
+                "createdAt": FieldValue.serverTimestamp()
+            ])
+            errorMessage = nil
+            return true
+        } catch {
+            errorMessage = error.localizedDescription
+            return false
         }
     }
 
@@ -420,10 +519,12 @@ final class BlurbStore: ObservableObject {
 
         photoOfMonthListener = database.collection("users").document(userID)
             .collection("photoOfMonthSelections")
-            .addSnapshotListener { [weak self] snapshot, _ in
+            .addSnapshotListener { [weak self] snapshot, error in
+                guard error == nil else { return }
                 let selections = snapshot?.documents.compactMap(Self.makePhotoOfMonthSelection) ?? []
                 Task { @MainActor in
                     self?.photoOfMonthSelections = Dictionary(uniqueKeysWithValues: selections.map { ($0.id, $0) })
+                    self?.photoOfMonthSelectionsLoaded = true
                 }
             }
     }
@@ -452,7 +553,7 @@ final class BlurbStore: ObservableObject {
         profile = BlurbProfile()
         profileLoaded = false
         needsProfileSetup = false
-        groups = []; groupsLoaded = false; posts = []; unfilteredPosts = []; answerCountsByGroup = [:]; myAnswerStatusByGroup = [:]; commentsByPostID = [:]; unfilteredCommentsByPostID = [:]; blockedUsers = []; newsletterEditions = []; photoOfMonthSelections = [:]; selectedGroupID = nil
+        groups = []; groupsLoaded = false; posts = []; unfilteredPosts = []; answerCountsByGroup = [:]; answeringMemberIDsByGroup = [:]; myAnswerStatusByGroup = [:]; commentsByPostID = [:]; unfilteredCommentsByPostID = [:]; blockedUsers = []; newsletterEditions = []; photoOfMonthSelections = [:]; photoOfMonthSelectionsLoaded = false; selectedGroupID = nil
         errorMessage = nil
         listenerErrors = [:]
         listenerErrorMessage = nil
@@ -469,9 +570,11 @@ final class BlurbStore: ObservableObject {
         answerCountListeners.values.forEach { $0.remove() }
         answerCountListeners = [:]
         answerCountsByGroup = [:]
+        answeringMemberIDsByGroup = [:]
         myAnswerStatusByGroup = [:]
 
         for group in groups {
+            let validMemberIDs = Set(group.memberIDs)
             answerCountListeners[group.id] = database.collection("posts")
                 .whereField("groupID", isEqualTo: group.id)
                 .whereField("promptID", isEqualTo: promptID)
@@ -487,13 +590,16 @@ final class BlurbStore: ObservableObject {
                     guard let snapshot else { return }
                     let uniqueAuthors = Set(snapshot.documents.compactMap { document -> String? in
                         guard document.data()["isSample"] as? Bool != true else { return nil }
-                        return document.data()["authorID"] as? String
+                        guard let authorID = document.data()["authorID"] as? String,
+                              validMemberIDs.contains(authorID) else { return nil }
+                        return authorID
                     })
                     Task { @MainActor in
                         guard self.listenerGeneration == generation else { return }
                         self.clearListenerError(source: "answer-count-\(group.id)")
                         guard self.activeAnswerCountPromptID == promptID else { return }
                         self.answerCountsByGroup[group.id] = uniqueAuthors.count
+                        self.answeringMemberIDsByGroup[group.id] = uniqueAuthors
                         self.myAnswerStatusByGroup[group.id] = uniqueAuthors.contains(self.currentUserID ?? "")
                     }
                 }
@@ -540,6 +646,62 @@ final class BlurbStore: ObservableObject {
             members[userID] = GroupMemberProfile(id: userID, name: profile.displayName, photoURL: profile.photoURL)
         }
         return members.values.filter { group.memberIDs.contains($0.id) }.sorted { $0.name < $1.name }
+    }
+
+    func loadMemberProfiles(in groupID: String, includeMonthlyProgress: Bool = true) async -> [GroupMemberProfile] {
+#if DEBUG
+        if isAppStoreScreenshotFixture,
+           let group = groups.first(where: { $0.id == groupID }) {
+            return group.memberIDs.map { memberID in
+                let knownPost = posts.first { $0.authorID == memberID }
+                return GroupMemberProfile(
+                    id: memberID,
+                    name: memberID == currentUserID ? profile.displayName : knownPost?.authorName ?? memberID.capitalized,
+                    photoURL: memberID == currentUserID ? profile.photoURL : knownPost?.authorPhotoURL
+                )
+            }
+        }
+#endif
+        do {
+            let result = try await Functions.functions().httpsCallable("getGroupMembers")
+                .call([
+                    "groupID": groupID,
+                    "includeMonthlyProgress": includeMonthlyProgress
+                ])
+            guard let payload = result.data as? [String: Any],
+                  let rawMembers = payload["members"] as? [[String: Any]] else {
+                return memberProfiles(in: groupID)
+            }
+            return rawMembers.compactMap { member in
+                guard let id = member["id"] as? String,
+                      let name = member["displayName"] as? String else { return nil }
+                let answeredCount = (member["newsletterAnsweredCount"] as? NSNumber)?.intValue ?? 0
+                let questionCount = (member["newsletterQuestionCount"] as? NSNumber)?.intValue ?? 0
+                return GroupMemberProfile(
+                    id: id,
+                    name: name,
+                    photoURL: member["photoURL"] as? String,
+                    newsletterAnsweredCount: answeredCount,
+                    newsletterQuestionCount: questionCount,
+                    hasPhotoOfMonth: member["hasPhotoOfMonth"] as? Bool ?? false
+                )
+            }.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        } catch {
+            errorMessage = error.localizedDescription
+            return memberProfiles(in: groupID)
+        }
+    }
+
+    func nudgeMonthlyProgress(for memberID: String, in groupID: String) async -> Bool {
+        errorMessage = nil
+        do {
+            _ = try await Functions.functions().httpsCallable("nudgeMonthlyProgress")
+                .call(["groupID": groupID, "memberID": memberID])
+            return true
+        } catch {
+            errorMessage = error.localizedDescription
+            return false
+        }
     }
 
     func mentionNames(in groupID: String? = nil) -> [String] {
@@ -750,6 +912,12 @@ final class BlurbStore: ObservableObject {
                 try await post.reference.delete()
             }
 
+            let customQuestions = try await database.collection("groups").document(group.id)
+                .collection("newsletterQuestions").getDocuments()
+            for question in customQuestions.documents {
+                try await question.reference.delete()
+            }
+
             try? await database.collection("groupInvites").document(group.inviteCode).delete()
             try await database.collection("groups").document(group.id).delete()
             if selectedGroupID == group.id { selectedGroupID = nil }
@@ -773,22 +941,37 @@ final class BlurbStore: ObservableObject {
             errorMessage = ContentModeration.rejectionMessage
             return false
         }
+        let isNewsletterQuestion = prompt.id.hasPrefix("newsletter-")
         guard !hasAnswered(promptID: prompt.id, in: targetGroupID) else {
-            errorMessage = "You've already answered today's Daily Blurb in this group. You can edit or delete it from the feed."
+            errorMessage = isNewsletterQuestion
+                ? "You've already answered this newsletter question in this group. You can edit your answer through the end of the month."
+                : "You've already answered today's Daily Blurb in this group. You can edit or delete it from the feed."
             return false
         }
         do {
             // Each group is its own conversation, so the same person may give
             // a different answer to the same prompt in every group.
             let entryID = "\(prompt.id)_\(userID)_\(targetGroupID)"
+            let existingEntries = try await database.collection("posts")
+                .whereField("groupID", isEqualTo: targetGroupID)
+                .whereField("promptID", isEqualTo: prompt.id)
+                .whereField("authorID", isEqualTo: userID)
+                .limit(to: 1)
+                .getDocuments(source: .server)
+            guard existingEntries.isEmpty else {
+                errorMessage = isNewsletterQuestion
+                    ? "You've already answered this newsletter question in this group."
+                    : "You've already answered today's Daily Blurb in this group."
+                return false
+            }
             // A post can be shared into a group whose feed is not loaded locally.
             // Read that group's actual answers instead of treating an empty local feed as first place.
             let groupSnapshot = try await database.collection("posts")
                 .whereField("groupID", isEqualTo: targetGroupID)
                 .getDocuments(source: .server)
-            let answerRank = groupSnapshot.documents.compactMap(Self.makePost)
+            let answerRank = isNewsletterQuestion ? 0 : groupSnapshot.documents.compactMap(Self.makePost)
                 .filter { !$0.isSample && $0.promptID == prompt.id }.count + 1
-            let pointsAwarded = Self.points(for: answerRank)
+            let pointsAwarded = isNewsletterQuestion ? 0 : Self.points(for: answerRank)
             var sharedValues: [String: Any] = [
                 "entryID": entryID,
                 "authorID": userID,
@@ -797,10 +980,10 @@ final class BlurbStore: ObservableObject {
                 "prompt": prompt.question,
                 "promptID": prompt.id,
                 "pollOptions": prompt.pollOptions,
-                "isMonthlyReportPrompt": prompt.isNewsletterFeature,
+                "isMonthlyReportPrompt": isNewsletterQuestion,
                 "createdAt": FieldValue.serverTimestamp(),
                 "editCount": 0,
-                "countsTowardStreak": true,
+                "countsTowardStreak": !isNewsletterQuestion,
                 "likeIDs": [],
                 "commentCount": 0,
                 "answerRank": answerRank,
@@ -827,7 +1010,7 @@ final class BlurbStore: ObservableObject {
             sharedValues["groupID"] = targetGroupID
             let reference = database.collection("posts").document(entryID)
             try await reference.setData(sharedValues)
-            if UserDefaults.standard.bool(forKey: "dailyReminderEnabled") {
+            if !isNewsletterQuestion && UserDefaults.standard.bool(forKey: "dailyReminderEnabled") {
                 NotificationManager.shared.markAnsweredToday()
             }
             return true
@@ -1029,12 +1212,15 @@ final class BlurbStore: ObservableObject {
         }
     }
 
-    func deletePost(_ post: BlurbPost) async {
-        guard let userID = currentUserID, post.authorID == userID else { return }
+    @discardableResult
+    func deletePost(_ post: BlurbPost) async -> Bool {
+        guard let userID = currentUserID, post.authorID == userID else { return false }
         do {
             try await database.collection("posts").document(post.id).delete()
+            return true
         } catch {
             errorMessage = error.localizedDescription
+            return false
         }
     }
 
@@ -1294,6 +1480,11 @@ final class BlurbStore: ObservableObject {
         groupsLoaded = true
         selectedGroupID = group.id
         answerCountsByGroup = ["roomies": 4, "family": 2, "college": 4]
+        answeringMemberIDsByGroup = [
+            "roomies": [userID, "maya", "jordan", "sam"],
+            "family": [userID, "maya"],
+            "college": [userID, "maya", "jordan", "sam"]
+        ]
         profile = BlurbProfile(displayName: "Alex", photoURL: nil)
         posts = [
             BlurbPost(id: "post-alex", entryID: "post-alex", groupID: group.id, authorID: userID, authorName: "Alex", authorPhotoURL: nil, imageURL: nil, answer: "A quiet cup of coffee before everyone woke up.", prompt: prompt.question, promptID: prompt.id, pollOptions: [], isMonthlyReportPrompt: false, createdAt: now.addingTimeInterval(-300), editedAt: nil, editCount: 0, countsTowardStreak: true, likeIDs: ["maya", "jordan"], answerRank: 1, pointsAwarded: 3, commentCount: 2),
@@ -1579,4 +1770,27 @@ struct GroupMemberProfile: Identifiable {
     let id: String
     let name: String
     let photoURL: String?
+    let newsletterAnsweredCount: Int
+    let newsletterQuestionCount: Int
+    let hasPhotoOfMonth: Bool
+
+    init(
+        id: String,
+        name: String,
+        photoURL: String?,
+        newsletterAnsweredCount: Int = 0,
+        newsletterQuestionCount: Int = 0,
+        hasPhotoOfMonth: Bool = false
+    ) {
+        self.id = id
+        self.name = name
+        self.photoURL = photoURL
+        self.newsletterAnsweredCount = newsletterAnsweredCount
+        self.newsletterQuestionCount = newsletterQuestionCount
+        self.hasPhotoOfMonth = hasPhotoOfMonth
+    }
+
+    var hasFinishedMonthlyProgress: Bool {
+        newsletterAnsweredCount >= newsletterQuestionCount && hasPhotoOfMonth
+    }
 }

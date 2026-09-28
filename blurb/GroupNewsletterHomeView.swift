@@ -5,6 +5,7 @@ struct GroupNewsletterHomeView: View {
     @EnvironmentObject private var blurbStore: BlurbStore
     let group: BlurbGroup
     @State private var promptClock = Date.now
+    @State private var customQuestions: [GroupNewsletterQuestion] = []
     @AppStorage("birthdayQuestionsEnabled") private var birthdayQuestionsEnabled = false
     @AppStorage("birthdayQuestion") private var birthdayQuestion = ""
     @AppStorage("birthdayTimestamp") private var birthdayTimestamp = Date.now.timeIntervalSince1970
@@ -36,7 +37,7 @@ struct GroupNewsletterHomeView: View {
 
     private var currentEdition: NewsletterEdition {
         let entries = currentPosts
-            .filter { $0.isMonthlyReportPrompt || $0.imageURL != nil }
+            .filter { $0.promptID.hasPrefix("newsletter-") }
             .map {
                 NewsletterEntry(
                     id: $0.id,
@@ -96,6 +97,22 @@ struct GroupNewsletterHomeView: View {
                         .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 8))
 
                     NavigationLink {
+                        NewsletterQuestionsView(groups: [group], date: promptClock)
+                    } label: {
+                        let prompts = QuestionBank.releasedNewsletterPrompts(for: promptClock)
+                            + customQuestions.map(\.prompt)
+                        let answered = prompts.filter { blurbStore.hasAnswered(promptID: $0.id, in: group.id) }.count
+                        newsletterCard(
+                            title: "Newsletter questions",
+                            subtitle: prompts.isEmpty
+                                ? "The first question arrives Friday"
+                                : "\(answered)/\(prompts.count) answered · editable through month-end",
+                            icon: answered == prompts.count && !prompts.isEmpty ? "checkmark.circle.fill" : "text.bubble.fill"
+                        )
+                    }
+                    .buttonStyle(.plain)
+
+                    NavigationLink {
                         PhotoOfMonthPickerView(group: group)
                     } label: {
                         newsletterCard(
@@ -136,6 +153,14 @@ struct GroupNewsletterHomeView: View {
                 try? await Task.sleep(for: .seconds(60))
             }
         }
+        .onAppear {
+            Task {
+                customQuestions = await blurbStore.loadCustomNewsletterQuestions(
+                    in: group.id,
+                    date: promptClock
+                )
+            }
+        }
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
     }
@@ -167,6 +192,7 @@ struct GroupNewsletterHomeView: View {
 }
 
 struct PhotoOfMonthPickerView: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @EnvironmentObject private var blurbStore: BlurbStore
     @Environment(\.dismiss) private var dismiss
     let group: BlurbGroup
@@ -185,7 +211,7 @@ struct PhotoOfMonthPickerView: View {
 
                 if let selection {
                     HStack(spacing: 12) {
-                        AsyncImage(url: URL(string: selection.imageURL)) { image in
+                        BlurbAsyncImage(url: URL(string: selection.imageURL)) { image in
                             image.resizable().scaledToFill()
                         } placeholder: { Rectangle().fill(.quaternary) }
                         .frame(width: 64, height: 64)
@@ -229,18 +255,23 @@ struct PhotoOfMonthPickerView: View {
                                 }
                             } label: {
                                 ZStack(alignment: .topTrailing) {
-                                    AsyncImage(url: URL(string: post.imageURL ?? "")) { image in
+                                    BlurbAsyncImage(url: URL(string: post.imageURL ?? "")) { image in
                                         image.resizable().scaledToFill()
                                     } placeholder: { Rectangle().fill(.quaternary) }
                                     .frame(height: 180).clipShape(RoundedRectangle(cornerRadius: 12))
                                     if selection?.postID == post.id {
-                                        Image(systemName: "checkmark.circle.fill").font(.title).foregroundStyle(.white, .green).padding(8)
+                                        Image(systemName: "checkmark.circle.fill")
+                                            .font(.title)
+                                            .foregroundStyle(.white, .green)
+                                            .padding(8)
+                                            .transition(.scale(scale: 0.7).combined(with: .opacity))
                                     }
                                     if savingPostID == post.id { ProgressView().padding(10) }
                                 }
                             }
                             .buttonStyle(.plain)
                             .disabled(savingPostID != nil || isUploading)
+                            .animation(reduceMotion ? nil : BlurbMotion.quick, value: selection?.postID == post.id)
                             .accessibilityLabel(selection?.postID == post.id ? "Selected photo" : "Select photo")
                         }
                     }

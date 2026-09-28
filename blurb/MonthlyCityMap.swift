@@ -8,6 +8,7 @@ private struct CityMapPin: Identifiable {
 }
 
 struct MonthlyCityMap: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let cities: [WrappedCityCount]
     var interactive = true
     @State private var pins: [CityMapPin] = []
@@ -95,7 +96,7 @@ struct MonthlyCityMap: View {
     }
 
     private func resetToRelevantCities() {
-        withAnimation(.spring(response: 0.3)) {
+        withAnimation(reduceMotion ? nil : BlurbMotion.interactive) {
             zoom = fittedZoom
             settledZoom = fittedZoom
             pan = fittedPan
@@ -142,7 +143,7 @@ struct MonthlyCityMap: View {
             settledPan = targetPan
         }
         if animated {
-            withAnimation(.spring(response: 0.45, dampingFraction: 0.86)) {
+            withAnimation(reduceMotion ? nil : BlurbMotion.interactive) {
                 update()
             }
         } else {

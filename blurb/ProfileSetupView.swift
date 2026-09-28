@@ -41,9 +41,8 @@ struct ProfileSetupView: View {
     @EnvironmentObject private var auth: AuthManager
     @EnvironmentObject private var blurbStore: BlurbStore
     @State private var name = ""
-    @State private var photoItem: PhotosPickerItem?
+    @State private var showingPhotoCropper = false
     @State private var photoData: Data?
-    @State private var isLoadingPhoto = false
     @State private var isSaving = false
     @State private var errorMessage: String?
 
@@ -60,7 +59,7 @@ struct ProfileSetupView: View {
                         .foregroundStyle(.secondary)
 
                     VStack(spacing: 12) {
-                        PhotosPicker(selection: $photoItem, matching: .images) {
+                        Button { showingPhotoCropper = true } label: {
                             VStack(spacing: 12) {
                                 if let photoData, let image = UIImage(data: photoData) {
                                     Image(uiImage: image)
@@ -71,13 +70,12 @@ struct ProfileSetupView: View {
                                 } else {
                                     ProfilePhoto(urlString: existingPhotoURL, size: 112)
                                 }
-                                Text(isLoadingPhoto ? "Loading photo…" : "Choose photo")
+                                Text("Choose and crop photo")
                                     .font(.subheadline.weight(.semibold))
                                     .foregroundStyle(.blue)
                             }
                         }
                         .buttonStyle(.plain)
-                        .disabled(isLoadingPhoto)
                         .accessibilityLabel("Choose profile photo")
                         Text("Photo is optional")
                             .font(.caption)
@@ -107,7 +105,7 @@ struct ProfileSetupView: View {
                         .background(.blue, in: RoundedRectangle(cornerRadius: 14))
                     }
                     .buttonStyle(.plain)
-                    .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isSaving || isLoadingPhoto)
+                    .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isSaving)
                     .accessibilityIdentifier("profileSetupContinue")
                 }
                 .padding(24)
@@ -126,29 +124,18 @@ struct ProfileSetupView: View {
                 let existingName = blurbStore.profile.displayName
                 name = existingName == "Blurb friend" ? "" : existingName
             }
-            .task(id: photoItem) {
-                guard let photoItem else { return }
-                isLoadingPhoto = true
-                defer { isLoadingPhoto = false }
-                do {
-                    guard let original = try await photoItem.loadTransferable(type: Data.self),
-                          let jpeg = preparedJPEG(from: original, maxDimension: 1_024) else {
-                        errorMessage = "That photo couldn't be opened. Please choose another."
-                        return
-                    }
-                    guard !Task.isCancelled else { return }
-                    photoData = jpeg
+            .sheet(isPresented: $showingPhotoCropper) {
+                CroppedProfilePhotoPicker(isPresented: $showingPhotoCropper) { croppedData in
+                    photoData = croppedData
                     errorMessage = nil
-                } catch {
-                    guard !Task.isCancelled else { return }
-                    errorMessage = "That photo couldn't be loaded. Please try again."
                 }
+                .ignoresSafeArea()
             }
         }
     }
 
     private func save() {
-        guard !isSaving, !isLoadingPhoto else { return }
+        guard !isSaving else { return }
         isSaving = true
         errorMessage = nil
         Task {

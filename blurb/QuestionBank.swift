@@ -203,14 +203,6 @@ enum QuestionBank {
             return pollPrompt
         }
 
-        if let newsletterPrompt = monthlyNewsletterPrompt(for: effectiveDate, calendar: calendar) {
-            return newsletterPrompt
-        }
-
-        if let photoPrompt = monthlyPhotoPrompt(for: effectiveDate, calendar: calendar) {
-            return photoPrompt
-        }
-
         let thursdayNumber = (calendar.component(.day, from: effectiveDate) - 1) / 7 + 1
         if calendar.component(.weekday, from: effectiveDate) == 5 && thursdayNumber <= 4 {
             return weeklyTriviaForEffectiveDate(effectiveDate)
@@ -367,6 +359,34 @@ enum QuestionBank {
         )
     }
 
+    /// Newsletter questions are a separate monthly track. One unlocks on each
+    /// of the first four Fridays and every released question remains available
+    /// for catch-up without replacing that day's Daily Blurb.
+    static func releasedNewsletterPrompts(for date: Date = .now) -> [DailyPrompt] {
+        let calendar = pacificCalendar
+        let effectiveDate = contentDate(for: date)
+        let year = calendar.component(.year, from: effectiveDate)
+        let month = calendar.component(.month, from: effectiveDate)
+
+        return (1...4).compactMap { ordinal in
+            var components = DateComponents()
+            components.calendar = calendar
+            components.timeZone = calendar.timeZone
+            components.year = year
+            components.month = month
+            components.weekday = 6
+            components.weekdayOrdinal = ordinal
+            guard let releaseDate = calendar.date(from: components),
+                  releaseDate <= effectiveDate else { return nil }
+            return DailyPrompt(
+                id: "newsletter-\(year)-\(month)-\(ordinal)",
+                question: deepByMonth[month - 1][ordinal - 1],
+                kind: .featured,
+                isNewsletterFeature: true
+            )
+        }
+    }
+
     private static func monthlyNewsletterPrompt(for date: Date, calendar: Calendar) -> DailyPrompt? {
         let year = calendar.component(.year, from: date)
         let month = calendar.component(.month, from: date)
@@ -377,7 +397,7 @@ enum QuestionBank {
             components.timeZone = calendar.timeZone
             components.year = year
             components.month = month
-            components.weekday = 4
+            components.weekday = 6
             components.weekdayOrdinal = ordinal
             guard let promptDate = calendar.date(from: components),
                   calendar.isDate(date, inSameDayAs: promptDate) else { continue }

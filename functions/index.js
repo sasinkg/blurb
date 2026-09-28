@@ -11,6 +11,7 @@ initializeApp();
 const {notificationRecipients} = require("./mentions");
 const {localDateKey, unansweredMemberIDs} = require("./socialNudges");
 const {aggregateCities, normalizeCityLocation} = require("./cityLocations");
+const {memberQuestionCounts, newsletterContext, nudgeMessage} = require("./monthlyProgress");
 const {
   buildSelection,
   photoMonthKey,
@@ -18,6 +19,145 @@ const {
   validateSelectionInput,
   validPrivatePhotoPath,
 } = require("./photoOfMonth");
+
+async function monthlyProgress(database, groupID, memberIDs, date = new Date()) {
+  const newsletter = newsletterContext(date);
+  const monthKey = photoMonthKey(date);
+  const [postsSnapshot, customQuestionsSnapshot] = await Promise.all([
+    database.collection("posts").where("groupID", "==", groupID).get(),
+    database.collection("groups").doc(groupID).collection("newsletterQuestions")
+        .where("monthKey", "==", monthKey).get(),
+  ]);
+  const promptIDs = [
+    ...newsletter.promptIDs,
+    ...customQuestionsSnapshot.docs
+        .map((document) => document.data().promptID)
+        .filter((promptID) => typeof promptID === "string" && promptID.startsWith("newsletter-custom-")),
+  ];
+  const questionCounts = memberQuestionCounts(
+      postsSnapshot.docs.map((document) => document.data()),
+      memberIDs,
+      promptIDs,
+  );
+  const photoSelections = await Promise.all(memberIDs.map((userID) => database.doc(
+      `users/${userID}/photoOfMonthSelections/${selectionDocumentID(groupID, monthKey)}`,
+  ).get()));
+  return new Map(memberIDs.map((userID, index) => [userID, {
+    newsletterAnsweredCount: questionCounts.get(userID) ?? 0,
+    newsletterQuestionCount: promptIDs.length,
+    hasPhotoOfMonth: photoSelections[index].exists,
+  }]));
+}
+
+exports.getGroupMembers = onCall(async (request) => {
+  if (!request.auth) throw new HttpsError("unauthenticated", "Sign in to view group members.");
+  const groupID = typeof request.data?.groupID === "string" ? request.data.groupID.trim() : "";
+  if (!groupID) throw new HttpsError("invalid-argument", "A group is required.");
+
+  const database = getFirestore();
+  const groupSnapshot = await database.doc(`groups/${groupID}`).get();
+  const group = groupSnapshot.data();
+  if (!groupSnapshot.exists || !(group?.memberIDs ?? []).includes(request.auth.uid)) {
+    throw new HttpsError("permission-denied", "You must be a member of this group.");
+  }
+
+  const memberIDs = [...new Set(group.memberIDs ?? [])].filter((id) => typeof id === "string" && id);
+  const includeMonthlyProgress = request.data?.includeMonthlyProgress !== false;
+  const [profiles, progress] = await Promise.all([
+    Promise.all(memberIDs.map((id) => database.doc(`users/${id}`).get())),
+    includeMonthlyProgress ? monthlyProgress(database, groupID, memberIDs) : Promise.resolve(new Map()),
+  ]);
+  return {
+    members: profiles.map((profile, index) => ({
+      id: memberIDs[index],
+      displayName: profile.data()?.displayName || "Blurb friend",
+      ...(profile.data()?.photoURL ? {photoURL: profile.data().photoURL} : {}),
+      ...(progress.get(memberIDs[index]) ?? {}),
+    })),
+  };
+});
+
+exports.nudgeMonthlyProgress = onCall(async (request) => {
+  if (!request.auth?.uid) throw new HttpsError("unauthenticated", "Sign in to send a nudge.");
+  const groupID = typeof request.data?.groupID === "string" ? request.data.groupID.trim() : "";
+  const memberID = typeof request.data?.memberID === "string" ? request.data.memberID.trim() : "";
+  if (!groupID || !memberID) throw new HttpsError("invalid-argument", "A group and member are required.");
+  if (memberID === request.auth.uid) throw new HttpsError("invalid-argument", "You can’t nudge yourself.");
+
+  const database = getFirestore();
+  const groupSnapshot = await database.doc(`groups/${groupID}`).get();
+  const group = groupSnapshot.data();
+  if (!groupSnapshot.exists || group?.ownerID !== request.auth.uid) {
+    throw new HttpsError("permission-denied", "Only the group owner can send nudges.");
+  }
+  if (!(group.memberIDs ?? []).includes(memberID)) {
+    throw new HttpsError("not-found", "That person is no longer in this group.");
+  }
+
+  const progress = (await monthlyProgress(database, groupID, [memberID])).get(memberID);
+  const needsQuestions = progress.newsletterAnsweredCount < progress.newsletterQuestionCount;
+  const needsPhoto = !progress.hasPhotoOfMonth;
+  if (!needsQuestions && !needsPhoto) {
+    throw new HttpsError("failed-precondition", "This member has completed their monthly check-in.");
+  }
+
+  const [memberSnapshot, senderSnapshot] = await Promise.all([
+    database.doc(`users/${memberID}`).get(),
+    database.doc(`users/${request.auth.uid}`).get(),
+  ]);
+  const member = memberSnapshot.data();
+  if (member?.notificationPreferences?.dailyReminders !== true) {
+    throw new HttpsError("failed-precondition", "This member has reminder notifications turned off.");
+  }
+  const tokens = [...new Set(member?.fcmTokens ?? [])]
+      .filter((token) => typeof token === "string" && token);
+  if (!tokens.length) {
+    throw new HttpsError("failed-precondition", "This member does not have notifications available right now.");
+  }
+
+  const today = localDateKey(new Date());
+  const receipt = database.doc(`notificationDeliveries/monthly-nudge-${groupID}-${memberID}-${today}`);
+  const claimed = await database.runTransaction(async (transaction) => {
+    if ((await transaction.get(receipt)).exists) return false;
+    transaction.create(receipt, {
+      groupID,
+      memberID,
+      senderID: request.auth.uid,
+      createdAt: FieldValue.serverTimestamp(),
+    });
+    return true;
+  });
+  if (!claimed) throw new HttpsError("resource-exhausted", "You already nudged this member today.");
+
+  const copy = nudgeMessage({
+    senderName: senderSnapshot.data()?.displayName,
+    groupName: group.name,
+    needsQuestions,
+    needsPhoto,
+  });
+  let sentCount = 0;
+  const userReference = database.doc(`users/${memberID}`);
+  for (let offset = 0; offset < tokens.length; offset += 500) {
+    const batch = tokens.slice(offset, offset + 500);
+    const response = await getMessaging().sendEachForMulticast({
+      tokens: batch,
+      notification: copy,
+      data: {type: "monthlyProgressNudge", groupID},
+      apns: {payload: {aps: {sound: "default"}}},
+    });
+    sentCount += response.successCount;
+    const invalid = batch.filter((_, index) => [
+      "messaging/invalid-registration-token",
+      "messaging/registration-token-not-registered",
+    ].includes(response.responses[index].error?.code));
+    if (invalid.length) await userReference.update({fcmTokens: FieldValue.arrayRemove(...invalid)});
+  }
+  if (!sentCount) {
+    await receipt.delete();
+    throw new HttpsError("unavailable", "The notification couldn’t be delivered right now.");
+  }
+  return {sent: true};
+});
 
 exports.setPhotoOfMonthSelection = onCall(async (request) => {
   if (!request.auth?.uid) throw new HttpsError("unauthenticated", "Sign in to choose a photo.");
@@ -149,7 +289,7 @@ exports.notifyAnswerMentions = onDocumentWritten("posts/{postID}", async (event)
 
 exports.notifyUnansweredGroupMembers = onDocumentCreated("posts/{postID}", async (event) => {
   const post = event.data?.data();
-  if (!post || post.isSample || !post.groupID || !post.authorID) return;
+  if (!post || post.isSample || !post.groupID || !post.authorID || post.promptID?.startsWith("newsletter-")) return;
 
   const database = getFirestore();
   const groupSnapshot = await database.doc(`groups/${post.groupID}`).get();
@@ -211,6 +351,57 @@ exports.notifyUnansweredGroupMembers = onDocumentCreated("posts/{postID}", async
   }
 });
 
+exports.remindNewsletterQuestion = onSchedule(
+    {schedule: "0 8 * * 5", timeZone: "America/Los_Angeles"},
+    async () => {
+      const database = getFirestore();
+      const now = new Date();
+      const parts = new Intl.DateTimeFormat("en-US", {
+        year: "numeric", month: "2-digit", day: "2-digit", timeZone: "America/Los_Angeles",
+      }).formatToParts(now);
+      const year = Number(parts.find((part) => part.type === "year").value);
+      const month = Number(parts.find((part) => part.type === "month").value);
+      const day = Number(parts.find((part) => part.type === "day").value);
+      const ordinal = Math.floor((day - 1) / 7) + 1;
+      if (ordinal > 4) return;
+
+      const groups = await database.collection("groups").get();
+      const memberIDs = [...new Set(groups.docs.flatMap((document) => document.data().memberIDs ?? []))]
+          .filter((id) => typeof id === "string" && id);
+      const monthKey = `${year}-${String(month).padStart(2, "0")}`;
+
+      for (const userID of memberIDs) {
+        const receipt = database.doc(`notificationDeliveries/newsletter-${monthKey}-${ordinal}-${userID}`);
+        const claimed = await database.runTransaction(async (transaction) => {
+          if ((await transaction.get(receipt)).exists) return false;
+          transaction.create(receipt, {createdAt: FieldValue.serverTimestamp()});
+          return true;
+        });
+        if (!claimed) continue;
+
+        const userReference = database.doc(`users/${userID}`);
+        const user = (await userReference.get()).data();
+        if (user?.notificationPreferences?.dailyReminders !== true) continue;
+        const tokens = [...new Set(user.fcmTokens ?? [])].filter((token) => typeof token === "string" && token);
+        if (!tokens.length) continue;
+        const response = await getMessaging().sendEachForMulticast({
+          tokens,
+          notification: {
+            title: "Your monthly question is ready",
+            body: ordinal === 1
+              ? "Answer the first newsletter question of the month. Your Daily Blurb is still waiting too."
+              : `Newsletter question ${ordinal} of 4 is ready. Catch up anytime before the month ends.`,
+          },
+          data: {type: "newsletterQuestion", monthKey, ordinal: String(ordinal)},
+          apns: {payload: {aps: {sound: "default"}}},
+        });
+        const invalid = tokens.filter((_, index) => ["messaging/invalid-registration-token", "messaging/registration-token-not-registered"]
+            .includes(response.responses[index].error?.code));
+        if (invalid.length) await userReference.update({fcmTokens: FieldValue.arrayRemove(...invalid)});
+      }
+    },
+);
+
 exports.generateMonthlyNewsletters = onSchedule(
     {schedule: "0 8 3 * *", timeZone: "America/Los_Angeles"},
     async () => {
@@ -246,34 +437,38 @@ exports.generateMonthlyNewsletters = onSchedule(
         const cityLocations = [];
         for (const document of monthPosts) {
           const post = document.data();
+          const isNewsletterQuestion = post.promptID?.startsWith("newsletter-") === true;
           const cityLocation = normalizeCityLocation(post.cityLocation);
-          if (cityLocation) cityLocations.push(cityLocation);
-          totals[post.authorName] = (totals[post.authorName] ?? 0) + (post.pointsAwarded ?? 0);
-          counts[post.authorName] = (counts[post.authorName] ?? 0) + 1;
-          if (post.imageURL) photoCount += 1;
-          const summary = {postID: document.id, authorName: post.authorName, prompt: post.prompt ?? "", answer: post.answer ?? "", value: 0};
-          const likes = Array.isArray(post.likeIDs) ? post.likeIDs.length : 0;
-          const comments = post.commentCount ?? 0;
-          if (!mostLiked || likes > mostLiked.value) mostLiked = {...summary, value: likes};
-          if (!mostCommented || comments > mostCommented.value) mostCommented = {...summary, value: comments};
-          entries.push({
-            postID: document.id,
-            authorID: post.authorID,
-            authorName: post.authorName,
-            authorPhotoURL: post.authorPhotoURL ?? null,
-            answer: post.answer ?? "",
-            prompt: post.prompt ?? "",
-            promptID: post.promptID ?? "",
-            imageURL: post.imageURL ?? null,
-            cityLocation: cityLocation ? {
-              city: cityLocation.city,
-              region: cityLocation.region,
-              countryCode: cityLocation.countryCode,
-            } : null,
-            pollOptions: post.pollOptions ?? [],
-            createdAt: post.createdAt,
-            pointsAwarded: post.pointsAwarded ?? 0,
-          });
+          if (!isNewsletterQuestion) {
+            if (cityLocation) cityLocations.push(cityLocation);
+            totals[post.authorName] = (totals[post.authorName] ?? 0) + (post.pointsAwarded ?? 0);
+            counts[post.authorName] = (counts[post.authorName] ?? 0) + 1;
+            if (post.imageURL) photoCount += 1;
+            const summary = {postID: document.id, authorName: post.authorName, prompt: post.prompt ?? "", answer: post.answer ?? "", value: 0};
+            const likes = Array.isArray(post.likeIDs) ? post.likeIDs.length : 0;
+            const comments = post.commentCount ?? 0;
+            if (!mostLiked || likes > mostLiked.value) mostLiked = {...summary, value: likes};
+            if (!mostCommented || comments > mostCommented.value) mostCommented = {...summary, value: comments};
+          } else {
+            entries.push({
+              postID: document.id,
+              authorID: post.authorID,
+              authorName: post.authorName,
+              authorPhotoURL: post.authorPhotoURL ?? null,
+              answer: post.answer ?? "",
+              prompt: post.prompt ?? "",
+              promptID: post.promptID ?? "",
+              imageURL: post.imageURL ?? null,
+              cityLocation: cityLocation ? {
+                city: cityLocation.city,
+                region: cityLocation.region,
+                countryCode: cityLocation.countryCode,
+              } : null,
+              pollOptions: post.pollOptions ?? [],
+              createdAt: post.createdAt,
+              pointsAwarded: 0,
+            });
+          }
         }
 
         for (const userID of group.memberIDs ?? []) {
@@ -314,8 +509,8 @@ exports.generateMonthlyNewsletters = onSchedule(
                 mostPoints: mostPoints ? {name: mostPoints[0], value: mostPoints[1]} : null,
               },
               stats: {
-                answerCount: monthPosts.length,
-                questionCount: new Set(monthPosts.map((document) => document.data().promptID)).size,
+                answerCount: monthPosts.filter((document) => !document.data().promptID?.startsWith("newsletter-")).length,
+                questionCount: new Set(entries.filter((entry) => entry.promptID?.startsWith("newsletter-")).map((entry) => entry.promptID)).size,
                 photoCount,
                 participatingMemberCount: Object.keys(counts).length,
                 groupMemberCount: (group.memberIDs ?? []).length,

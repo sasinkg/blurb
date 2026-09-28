@@ -65,6 +65,18 @@ struct blurbTests {
         }
     }
 
+    @Test func newsletterQuestionsReleaseOnFirstFourFridaysWithoutReplacingDailyPrompt() {
+        let formatter = ISO8601DateFormatter()
+        let beforeFirstFriday = formatter.date(from: "2026-09-03T17:00:00Z")!
+        let firstFriday = formatter.date(from: "2026-09-04T17:00:00Z")!
+        let afterFourthFriday = formatter.date(from: "2026-09-26T17:00:00Z")!
+
+        #expect(QuestionBank.releasedNewsletterPrompts(for: beforeFirstFriday).isEmpty)
+        #expect(QuestionBank.releasedNewsletterPrompts(for: firstFriday).count == 1)
+        #expect(QuestionBank.releasedNewsletterPrompts(for: afterFourthFriday).count == 4)
+        #expect(!QuestionBank.prompt(for: firstFriday).id.hasPrefix("newsletter-"))
+    }
+
     @Test func objectionableLanguageFilterBlocksExactTermsAndThreatsWithoutSubstringFalsePositives() {
         #expect(ContentModeration.allows("That fire-retardant jacket worked."))
         #expect(ContentModeration.allows("We had a ridiculous, wonderful day."))

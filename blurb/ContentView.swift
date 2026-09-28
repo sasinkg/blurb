@@ -32,6 +32,49 @@ func preparedJPEG(from data: Data, maxDimension: CGFloat = 1_600) -> Data? {
     return resized.jpegData(compressionQuality: 0.82)
 }
 
+struct CroppedProfilePhotoPicker: UIViewControllerRepresentable {
+    @Binding var isPresented: Bool
+    let onComplete: (Data) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
+
+    func makeUIViewController(context: Context) -> UIImagePickerController {
+        let picker = UIImagePickerController()
+        picker.sourceType = .photoLibrary
+        picker.allowsEditing = true
+        picker.delegate = context.coordinator
+        return picker
+    }
+
+    func updateUIViewController(_ uiViewController: UIImagePickerController, context: Context) {}
+
+    final class Coordinator: NSObject, UINavigationControllerDelegate, UIImagePickerControllerDelegate {
+        var parent: CroppedProfilePhotoPicker
+
+        init(parent: CroppedProfilePhotoPicker) {
+            self.parent = parent
+        }
+
+        func imagePickerController(
+            _ picker: UIImagePickerController,
+            didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]
+        ) {
+            guard let image = (info[.editedImage] ?? info[.originalImage]) as? UIImage,
+                  let data = image.jpegData(compressionQuality: 0.86),
+                  let prepared = preparedJPEG(from: data, maxDimension: 1_024) else {
+                parent.isPresented = false
+                return
+            }
+            parent.onComplete(prepared)
+            parent.isPresented = false
+        }
+
+        func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
+            parent.isPresented = false
+        }
+    }
+}
+
 enum AppTab: String, CaseIterable, Identifiable {
     case home, profile, settings
 
@@ -56,6 +99,7 @@ enum AppTab: String, CaseIterable, Identifiable {
     var dockWidth: CGFloat {
         54
     }
+
 }
 
 struct ContentView: View {
@@ -65,14 +109,19 @@ struct ContentView: View {
     @State private var showingCreateGroup = false
     @State private var showingHomeAnswer = false
     @State private var showingHomeAudience = false
+    @State private var showingTodayAnswers = false
     @State private var homeAnswerDraft: String?
     @State private var homeImageDraft: Data?
+    @State private var homeInitialAnswer: String?
     @State private var dailyPromptClock = Date.now
+    @State private var showingNewsletterQuestions = false
     @State private var showingBlurbMapAnnouncement = false
+    @State private var showingNewsletterUpdate = false
     @AppStorage("birthdayQuestionsEnabled") private var birthdayQuestionsEnabled = false
     @AppStorage("birthdayQuestion") private var birthdayQuestion = ""
     @AppStorage("birthdayTimestamp") private var birthdayTimestamp = Date.now.timeIntervalSince1970
     @AppStorage("hasSeenBlurbMapAnnouncementV1") private var hasSeenBlurbMapAnnouncement = false
+    @AppStorage("hasSeenNewsletterQuestionsUpdateV1") private var hasSeenNewsletterQuestionsUpdate = false
 
     var body: some View {
         TabView(selection: $selectedTab) {
@@ -117,10 +166,27 @@ struct ContentView: View {
                 .presentationDragIndicator(.hidden)
                 .presentationBackground(.ultraThinMaterial)
         }
+        .sheet(isPresented: $showingNewsletterUpdate, onDismiss: {
+            hasSeenNewsletterQuestionsUpdate = true
+        }) {
+            NewsletterUpdateAnnouncementView()
+                .presentationDetents([.large])
+                .presentationDragIndicator(.hidden)
+                .presentationBackground(.ultraThinMaterial)
+        }
+        .task(id: blurbStore.groupsLoaded) {
+            guard blurbStore.groupsLoaded,
+                  !blurbStore.groups.isEmpty,
+                  !hasSeenNewsletterQuestionsUpdate else { return }
+            try? await Task.sleep(for: .milliseconds(350))
+            guard !Task.isCancelled else { return }
+            showingNewsletterUpdate = true
+        }
         .task(id: blurbStore.groups.count) {
             guard blurbStore.groupsLoaded,
                   !blurbStore.groups.isEmpty,
-                  !hasSeenBlurbMapAnnouncement else { return }
+                  !hasSeenBlurbMapAnnouncement,
+                  hasSeenNewsletterQuestionsUpdate else { return }
             try? await Task.sleep(for: .milliseconds(450))
             guard !Task.isCancelled else { return }
             showingBlurbMapAnnouncement = true
@@ -162,17 +228,55 @@ struct ContentView: View {
                             if !blurbStore.groups.isEmpty {
                                 let answered = blurbStore.groups.filter { blurbStore.myAnswerStatusByGroup[$0.id] == true }.count
                                 let loaded = blurbStore.groups.allSatisfy { blurbStore.myAnswerStatusByGroup[$0.id] != nil }
-                                Text(loaded ? "\(answered)/\(blurbStore.groups.count) groups answered today" : "Checking today's answers…")
-                                    .font(.subheadline.weight(.medium))
-                                    .foregroundStyle(.secondary)
+                                Text(loaded
+                                     ? "\(answered)/\(blurbStore.groups.count) groups answered today"
+                                     : "Checking today's answers…")
+                                .monospacedDigit()
+                                .font(.subheadline.weight(.medium))
+                                .foregroundStyle(.secondary)
+                                .frame(height: 20, alignment: .leading)
                             }
                         }
 
-                        HomePromptCard(prompt: todayPrompt) {
+                        if !newsletterPrompts.isEmpty {
+                            Button { showingNewsletterQuestions = true } label: {
+                                HStack(spacing: 12) {
+                                    Image(systemName: "newspaper.fill")
+                                        .font(.title2)
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text(newsletterPrompts.count == 1
+                                             ? "HEY, YOU HAVE A MONTHLY QUESTION TO ANSWER"
+                                             : "\(newsletterPrompts.count) MONTHLY QUESTIONS ARE READY")
+                                            .font(.caption.weight(.black))
+                                            .tracking(0.7)
+                                        Text("Separate from today’s Daily Blurb · no points · editable through month-end")
+                                            .font(.caption)
+                                            .multilineTextAlignment(.leading)
+                                    }
+                                    Spacer(minLength: 4)
+                                    Image(systemName: "chevron.right")
+                                        .font(.caption.bold())
+                                }
+                                .foregroundStyle(.black)
+                                .padding(14)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(Color(red: 1, green: 0.78, blue: 0.02), in: RoundedRectangle(cornerRadius: 8))
+                            }
+                            .buttonStyle(.plain)
+                        }
+
+                        HomePromptCard(
+                            prompt: todayPrompt,
+                            answeredAllGroups: hasAnsweredAllGroups,
+                            answerStatusLoaded: !blurbStore.groups.isEmpty
+                                && blurbStore.groups.allSatisfy { blurbStore.myAnswerStatusByGroup[$0.id] != nil }
+                        ) {
                             if blurbStore.groups.isEmpty {
                                 showingCreateGroup = true
+                            } else if hasAnsweredAllGroups {
+                                showingTodayAnswers = true
                             } else {
-                                showingHomeAnswer = true
+                                beginHomeAnswer()
                             }
                         }
 
@@ -219,7 +323,7 @@ struct ContentView: View {
             .sheet(isPresented: $showingHomeAnswer, onDismiss: offerHomeAudience) {
                 NewPostView(
                     prompt: todayPrompt.question,
-                    initialAnswer: nil,
+                    initialAnswer: homeInitialAnswer,
                     themeSeed: todayPrompt.id,
                     requiresPhoto: todayPrompt.requiresPhoto,
                     pollOptions: todayPrompt.pollOptions
@@ -231,10 +335,24 @@ struct ContentView: View {
                 .presentationBackground(.ultraThinMaterial)
             }
             .sheet(isPresented: $showingHomeAudience, onDismiss: clearHomeDraft) {
-                HomeAudiencePicker(groups: blurbStore.groups) { selectedGroups in
+                HomeAudiencePicker(
+                    groups: blurbStore.groups,
+                    answeredGroupIDs: Set(
+                        blurbStore.myAnswerStatusByGroup.compactMap { $0.value ? $0.key : nil }
+                    )
+                ) { selectedGroups in
                     await applyHomeAnswer(to: selectedGroups)
                 }
                 .presentationBackground(.ultraThinMaterial)
+            }
+            .sheet(isPresented: $showingNewsletterQuestions) {
+                NewsletterQuestionsView(groups: blurbStore.groups, date: dailyPromptClock)
+                    .presentationBackground(.ultraThinMaterial)
+            }
+            .sheet(isPresented: $showingTodayAnswers) {
+                TodayAnswersView(groups: blurbStore.groups, prompt: todayPrompt)
+                    .presentationDetents([.medium, .large])
+                    .presentationBackground(.ultraThinMaterial)
             }
             .task(id: todayPrompt.id) {
                 blurbStore.listenForAnswerCounts(promptID: todayPrompt.id)
@@ -253,9 +371,42 @@ struct ContentView: View {
         )
     }
 
+    private var newsletterPrompts: [DailyPrompt] {
+        QuestionBank.releasedNewsletterPrompts(for: dailyPromptClock)
+    }
+
+    private var hasAnsweredAllGroups: Bool {
+        !blurbStore.groups.isEmpty
+            && blurbStore.groups.allSatisfy { blurbStore.myAnswerStatusByGroup[$0.id] == true }
+    }
+
     private func offerHomeAudience() {
-        guard homeAnswerDraft != nil || homeImageDraft != nil else { return }
-        showingHomeAudience = true
+        guard homeAnswerDraft != nil || homeImageDraft != nil else {
+            clearHomeDraft()
+            return
+        }
+        guard blurbStore.groups.count == 1, let group = blurbStore.groups.first else {
+            showingHomeAudience = true
+            return
+        }
+
+        Task {
+            _ = await applyHomeAnswer(to: [group])
+        }
+    }
+
+    private func beginHomeAnswer() {
+        homeInitialAnswer = nil
+        guard blurbStore.groups.count == 1, let group = blurbStore.groups.first else {
+            showingHomeAnswer = true
+            return
+        }
+
+        Task {
+            let existing = await blurbStore.existingAnswer(promptID: todayPrompt.id, in: group.id)
+            homeInitialAnswer = existing?.answer
+            showingHomeAnswer = true
+        }
     }
 
     private func applyHomeAnswer(to groups: [BlurbGroup]) async -> Bool {
@@ -282,8 +433,608 @@ struct ContentView: View {
     private func clearHomeDraft() {
         homeAnswerDraft = nil
         homeImageDraft = nil
+        homeInitialAnswer = nil
     }
 
+}
+
+private struct NewsletterAnswerTarget: Identifiable {
+    let group: BlurbGroup
+    let prompt: DailyPrompt
+    let existingAnswer: BlurbPost?
+    var id: String { "\(group.id)-\(prompt.id)" }
+}
+
+private struct NewsletterUpdateAnnouncementView: View {
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        ZStack {
+            GlassBackground()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    HStack(alignment: .top) {
+                        Text("NEW IN BLURB")
+                            .font(.caption.weight(.black))
+                            .tracking(1.5)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .foregroundStyle(.black)
+                            .background(Color(red: 1, green: 0.78, blue: 0.02))
+                        Spacer()
+                        Button { dismiss() } label: {
+                            Image(systemName: "xmark")
+                                .font(.body.weight(.bold))
+                                .frame(width: 38, height: 38)
+                                .background(.thinMaterial, in: Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Close")
+                    }
+
+                    VStack(alignment: .leading, spacing: 7) {
+                        Text("Monthly newsletter questions")
+                            .font(.system(size: 32, weight: .bold, design: .serif))
+                        Text("A new way to save the stories that deserve more than one day.")
+                            .foregroundStyle(.secondary)
+                    }
+
+                    updateRule(
+                        icon: "calendar.badge.clock",
+                        title: "Four questions each month",
+                        text: "One arrives on each of the first four Fridays. Missed one? Catch up anytime through month-end."
+                    )
+                    updateRule(
+                        icon: "plus.bubble.fill",
+                        title: "Add a group question",
+                        text: "Any member can add an optional extra prompt. It belongs only to that group and never replaces an official Friday question."
+                    )
+                    updateRule(
+                        icon: "arrow.triangle.branch",
+                        title: "Separate from your Daily Blurb",
+                        text: "Newsletter answers do not complete the daily question and never earn points, placement medals, or streak credit."
+                    )
+                    updateRule(
+                        icon: "pencil.and.outline",
+                        title: "Edit and reuse freely",
+                        text: "Edit an answer through month-end, reuse it in every unanswered group, or write something different for each group."
+                    )
+                    updateRule(
+                        icon: "photo.badge.plus",
+                        title: "Build the finished edition",
+                        text: "Official and group-added answers join each member’s Photo of the Month and the group’s monthly highlights."
+                    )
+
+                    Text("Want to see these rules again? Open **Settings → How Questions Work**.")
+                        .font(.subheadline)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(14)
+                        .background(Color(red: 1, green: 0.78, blue: 0.02).opacity(0.2), in: RoundedRectangle(cornerRadius: 8))
+
+                    Button { dismiss() } label: {
+                        Text("Got it")
+                            .font(.headline)
+                            .foregroundStyle(.black)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 14)
+                            .background(Color(red: 1, green: 0.78, blue: 0.02), in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(22)
+            }
+        }
+    }
+
+    private func updateRule(icon: String, title: String, text: String) -> some View {
+        HStack(alignment: .top, spacing: 13) {
+            Image(systemName: icon)
+                .font(.headline)
+                .foregroundStyle(Color(red: 0.88, green: 0.64, blue: 0.02))
+                .frame(width: 28)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.system(.headline, design: .serif).bold())
+                Text(text)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
+private struct NewsletterQuestionRow: View {
+    let number: Int
+    let prompt: DailyPrompt
+    let answered: Bool
+    let action: () -> Void
+    let reuseAction: (() -> Void)?
+    var context: String? = nil
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Button(action: action) {
+                ZStack(alignment: .trailing) {
+                    HStack(alignment: .top, spacing: 12) {
+                        Text(String(number))
+                            .font(.caption.weight(.black))
+                            .foregroundStyle(.black)
+                            .frame(width: 28, height: 28)
+                            .background(Color(red: 1, green: 0.78, blue: 0.02), in: Circle())
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text(prompt.question)
+                                .font(.system(.body, design: .serif).weight(.semibold))
+                                .multilineTextAlignment(.leading)
+                            Text(answered ? "Answered · tap to edit" : "Tap to answer")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(answered ? Color.green : Color.secondary)
+                            if let context {
+                                Text(context)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        Spacer(minLength: 34)
+                    }
+
+                    Image(systemName: answered ? "checkmark.circle.fill" : "square.and.pencil")
+                        .foregroundStyle(answered ? Color.green : Color.secondary)
+                }
+                .foregroundStyle(.primary)
+                .padding(14)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.plain)
+
+            if let reuseAction {
+                Divider()
+                    .frame(height: 42)
+
+                Button(action: reuseAction) {
+                    VStack(spacing: 3) {
+                        Image(systemName: "arrow.trianglehead.2.clockwise.rotate.90")
+                            .font(.subheadline.weight(.bold))
+                        Text("Reuse")
+                            .font(.caption2.weight(.bold))
+                    }
+                    .foregroundStyle(.black)
+                    .frame(width: 64, height: 54)
+                    .background(
+                        Color(red: 1, green: 0.78, blue: 0.02).opacity(0.9),
+                        in: RoundedRectangle(cornerRadius: 8)
+                    )
+                    .padding(.trailing, 7)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Reuse newsletter answer in another group")
+            }
+        }
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 10))
+        .overlay {
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(.primary.opacity(0.22), lineWidth: 1)
+        }
+    }
+}
+
+struct NewsletterQuestionsView: View {
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var blurbStore: BlurbStore
+    let groups: [BlurbGroup]
+    let date: Date
+    @State private var answerTarget: NewsletterAnswerTarget?
+    @State private var reuseAnswer: String?
+    @State private var reusePrompt: DailyPrompt?
+    @State private var reuseSourceGroupID: String?
+    @State private var showingReuseOptions = false
+    @State private var reuseResultMessage = ""
+    @State private var showingReuseResult = false
+    @State private var newsletterAnswers: [String: BlurbPost] = [:]
+    @State private var newsletterAnswersLoaded = false
+    @State private var customQuestionsByGroup: [String: [GroupNewsletterQuestion]] = [:]
+    @State private var addQuestionGroup: BlurbGroup?
+
+    private var officialPrompts: [DailyPrompt] {
+        QuestionBank.releasedNewsletterPrompts(for: date)
+    }
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                GlassBackground()
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 18) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("MONTHLY NEWSLETTER")
+                                .font(.caption.weight(.black))
+                                .tracking(1.4)
+                                .padding(.horizontal, 9)
+                                .padding(.vertical, 5)
+                                .foregroundStyle(.black)
+                                .background(Color(red: 1, green: 0.78, blue: 0.02))
+                            Text("Catch up anytime")
+                                .font(.system(size: 30, weight: .bold, design: .serif))
+                            Text("A new official question arrives each Friday. Groups can also add their own optional questions. Everything here is separate from your Daily Blurb, earns no points, and can be edited through the end of the month.")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+
+                        ForEach(groups) { group in
+                            VStack(alignment: .leading, spacing: 10) {
+                                HStack {
+                                    Text(group.name.uppercased())
+                                        .font(.caption.weight(.black))
+                                        .tracking(1)
+                                    Spacer()
+                                    Text(completionText(for: group))
+                                        .font(.caption.weight(.semibold))
+                                        .foregroundStyle(.secondary)
+                                }
+
+                                ForEach(Array(officialPrompts.enumerated()), id: \.element.id) { index, prompt in
+                                    let existing = newsletterAnswer(for: prompt, in: group)
+                                    NewsletterQuestionRow(
+                                        number: index + 1,
+                                        prompt: prompt,
+                                        answered: existing != nil,
+                                        action: {
+                                            answerTarget = NewsletterAnswerTarget(
+                                                group: group,
+                                                prompt: prompt,
+                                                existingAnswer: existing
+                                            )
+                                        },
+                                        reuseAction: reuseAction(
+                                            for: existing,
+                                            prompt: prompt,
+                                            sourceGroupID: group.id
+                                        )
+                                    )
+                                }
+
+                                let customQuestions = customQuestionsByGroup[group.id] ?? []
+                                if !customQuestions.isEmpty {
+                                    Text("ADDED BY THIS GROUP")
+                                        .font(.caption2.weight(.black))
+                                        .tracking(0.8)
+                                        .foregroundStyle(.secondary)
+                                        .padding(.top, 5)
+
+                                    ForEach(Array(customQuestions.enumerated()), id: \.element.id) { index, customQuestion in
+                                        let prompt = customQuestion.prompt
+                                        let existing = newsletterAnswer(for: prompt, in: group)
+                                        NewsletterQuestionRow(
+                                            number: officialPrompts.count + index + 1,
+                                            prompt: prompt,
+                                            answered: existing != nil,
+                                            action: {
+                                                answerTarget = NewsletterAnswerTarget(
+                                                    group: group,
+                                                    prompt: prompt,
+                                                    existingAnswer: existing
+                                                )
+                                            },
+                                            reuseAction: nil,
+                                            context: "Added by \(customQuestion.authorName) · only in \(group.name)"
+                                        )
+                                    }
+                                }
+
+                                Button {
+                                    addQuestionGroup = group
+                                } label: {
+                                    Label("Add a question to \(group.name)", systemImage: "plus.circle.fill")
+                                        .font(.subheadline.weight(.semibold))
+                                        .foregroundStyle(.primary)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .padding(.vertical, 9)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                    }
+                    .padding()
+                }
+            }
+            .navigationTitle("Newsletter questions")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+            .sheet(item: $answerTarget, onDismiss: offerNewsletterReuse) { target in
+                NewPostView(
+                    prompt: target.prompt.question,
+                    initialAnswer: target.existingAnswer?.answer,
+                    themeSeed: target.group.name,
+                    isNewsletterAnswer: true
+                ) { answer, _ in
+                    let succeeded: Bool
+                    if let existing = target.existingAnswer {
+                        succeeded = await blurbStore.editPost(existing, answer: answer)
+                    } else {
+                        succeeded = await blurbStore.createPost(
+                            answer: answer,
+                            prompt: target.prompt,
+                            in: target.group.id
+                        )
+                    }
+                    if succeeded {
+                        await refreshNewsletterAnswer(for: target.prompt, in: target.group)
+                        reuseAnswer = answer
+                        reusePrompt = target.prompt
+                        reuseSourceGroupID = target.group.id
+                    }
+                    return succeeded
+                }
+                .presentationBackground(.ultraThinMaterial)
+            }
+            .sheet(item: $addQuestionGroup) { group in
+                AddNewsletterQuestionView(group: group, date: date) {
+                    await loadCustomNewsletterQuestions(for: group)
+                }
+                .presentationBackground(.ultraThinMaterial)
+            }
+            .confirmationDialog(
+                "Reuse this newsletter answer?",
+                isPresented: $showingReuseOptions,
+                titleVisibility: .visible
+            ) {
+                if reusableGroups.count > 1 {
+                    Button("All unanswered groups") {
+                        reuseNewsletterAnswer(in: reusableGroups)
+                    }
+                }
+                ForEach(reusableGroups) { group in
+                    Button(group.name) {
+                        reuseNewsletterAnswer(in: [group])
+                    }
+                }
+                Button("Not now", role: .cancel) { clearReuseDraft() }
+            } message: {
+                Text("This adds the same answer to the group you choose. Your original answer stays where it is—there’s nothing to paste.")
+            }
+            .alert("Answer reused", isPresented: $showingReuseResult) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(reuseResultMessage)
+            }
+            .task {
+                await loadCustomNewsletterQuestions()
+                await loadNewsletterAnswers()
+            }
+        }
+    }
+
+    private func completionText(for group: BlurbGroup) -> String {
+        let groupPrompts = prompts(for: group)
+        let answered = groupPrompts.filter { newsletterAnswer(for: $0, in: group) != nil }.count
+        return "\(answered)/\(groupPrompts.count) answered"
+    }
+
+    private var reusableGroups: [BlurbGroup] {
+        guard let prompt = reusePrompt else { return [] }
+        return reusableGroups(for: prompt, excluding: reuseSourceGroupID)
+    }
+
+    private func reusableGroups(for prompt: DailyPrompt, excluding sourceGroupID: String?) -> [BlurbGroup] {
+        guard newsletterAnswersLoaded,
+              !prompt.id.hasPrefix("newsletter-custom-") else { return [] }
+        return groups.filter {
+            $0.id != sourceGroupID && newsletterAnswer(for: prompt, in: $0) == nil
+        }
+    }
+
+    private func answerKey(promptID: String, groupID: String) -> String {
+        "\(promptID)|\(groupID)"
+    }
+
+    private func newsletterAnswer(for prompt: DailyPrompt, in group: BlurbGroup) -> BlurbPost? {
+        newsletterAnswers[answerKey(promptID: prompt.id, groupID: group.id)]
+            ?? blurbStore.answer(for: prompt.id, in: group.id)
+    }
+
+    private func prompts(for group: BlurbGroup) -> [DailyPrompt] {
+        officialPrompts + (customQuestionsByGroup[group.id] ?? []).map(\.prompt)
+    }
+
+    private func loadCustomNewsletterQuestions() async {
+        for group in groups {
+            guard !Task.isCancelled else { return }
+            await loadCustomNewsletterQuestions(for: group)
+        }
+    }
+
+    private func loadCustomNewsletterQuestions(for group: BlurbGroup) async {
+        customQuestionsByGroup[group.id] = await blurbStore.loadCustomNewsletterQuestions(
+            in: group.id,
+            date: date
+        )
+    }
+
+    private func loadNewsletterAnswers() async {
+        var loaded: [String: BlurbPost] = [:]
+        for group in groups {
+            for prompt in prompts(for: group) {
+                guard !Task.isCancelled else { return }
+                if let answer = await blurbStore.existingAnswer(promptID: prompt.id, in: group.id) {
+                    loaded[answerKey(promptID: prompt.id, groupID: group.id)] = answer
+                }
+            }
+        }
+        newsletterAnswers = loaded
+        newsletterAnswersLoaded = true
+    }
+
+    private func refreshNewsletterAnswer(for prompt: DailyPrompt, in group: BlurbGroup) async {
+        let key = answerKey(promptID: prompt.id, groupID: group.id)
+        if let answer = await blurbStore.existingAnswer(promptID: prompt.id, in: group.id) {
+            newsletterAnswers[key] = answer
+        } else {
+            newsletterAnswers[key] = nil
+        }
+    }
+
+    private func reuseAction(
+        for answer: BlurbPost?,
+        prompt: DailyPrompt,
+        sourceGroupID: String
+    ) -> (() -> Void)? {
+        guard let answer,
+              !reusableGroups(for: prompt, excluding: sourceGroupID).isEmpty else { return nil }
+        return {
+            reuseAnswer = answer.answer
+            reusePrompt = prompt
+            reuseSourceGroupID = sourceGroupID
+            showingReuseOptions = true
+        }
+    }
+
+    private func offerNewsletterReuse() {
+        guard reuseAnswer != nil, reusePrompt != nil, !reusableGroups.isEmpty else {
+            clearReuseDraft()
+            return
+        }
+        showingReuseOptions = true
+    }
+
+    private func reuseNewsletterAnswer(in destinations: [BlurbGroup]) {
+        guard let answer = reuseAnswer, let prompt = reusePrompt else { return }
+        Task {
+            var completedGroups: [String] = []
+            for group in destinations {
+                if await blurbStore.existingAnswer(promptID: prompt.id, in: group.id) != nil {
+                    await refreshNewsletterAnswer(for: prompt, in: group)
+                    continue
+                }
+                guard await blurbStore.createPost(answer: answer, prompt: prompt, in: group.id) else {
+                    clearReuseDraft()
+                    return
+                }
+                await refreshNewsletterAnswer(for: prompt, in: group)
+                completedGroups.append(group.name)
+            }
+            clearReuseDraft()
+            if completedGroups.isEmpty {
+                reuseResultMessage = "That question was already answered in the selected group."
+            } else if completedGroups.count == 1 {
+                reuseResultMessage = "Your answer is now in \(completedGroups[0])."
+            } else {
+                reuseResultMessage = "Your answer is now in \(completedGroups.count) more groups."
+            }
+            showingReuseResult = true
+        }
+    }
+
+    private func clearReuseDraft() {
+        reuseAnswer = nil
+        reusePrompt = nil
+        reuseSourceGroupID = nil
+    }
+}
+
+private struct AddNewsletterQuestionView: View {
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var blurbStore: BlurbStore
+    let group: BlurbGroup
+    let date: Date
+    let onAdded: () async -> Void
+    @State private var question = ""
+    @State private var isSaving = false
+    @State private var saveError: String?
+
+    private var trimmedQuestion: String {
+        question.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                GlassBackground()
+                VStack(alignment: .leading, spacing: 18) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("GROUP QUESTION")
+                            .font(.caption.weight(.black))
+                            .tracking(1.2)
+                            .foregroundStyle(.black)
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 5)
+                            .background(Color(red: 1, green: 0.78, blue: 0.02))
+                        Text("Ask \(group.name)")
+                            .font(.system(size: 30, weight: .bold, design: .serif))
+                        Text("This is an extra question for this group’s newsletter only. It won’t appear in another group, replace a Friday question, or award points.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    TextField("What should the group answer?", text: $question, axis: .vertical)
+                        .lineLimit(3...7)
+                        .padding(15)
+                        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 10))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 10)
+                                .stroke(.primary.opacity(0.22), lineWidth: 1)
+                        }
+
+                    Text("\(question.count)/180")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(question.count > 180 ? Color.red : Color.secondary)
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+
+                    Button {
+                        addQuestion()
+                    } label: {
+                        HStack {
+                            Spacer()
+                            if isSaving { ProgressView().tint(.black) }
+                            Text(isSaving ? "Adding…" : "Add to newsletter")
+                                .font(.headline)
+                            Spacer()
+                        }
+                        .foregroundStyle(.black)
+                        .padding(.vertical, 14)
+                        .background(Color(red: 1, green: 0.78, blue: 0.02), in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(trimmedQuestion.isEmpty || question.count > 180 || isSaving)
+                    .opacity(trimmedQuestion.isEmpty || question.count > 180 ? 0.42 : 1)
+
+                    Spacer()
+                }
+                .padding(22)
+            }
+            .navigationTitle("Add question")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+            }
+            .alert("Couldn’t add question", isPresented: Binding(
+                get: { saveError != nil },
+                set: { if !$0 { saveError = nil } }
+            )) {
+                Button("OK", role: .cancel) { saveError = nil }
+            } message: {
+                Text(saveError ?? "Please try again.")
+            }
+        }
+    }
+
+    private func addQuestion() {
+        guard !isSaving else { return }
+        isSaving = true
+        Task {
+            if await blurbStore.addCustomNewsletterQuestion(trimmedQuestion, to: group.id, date: date) {
+                await onAdded()
+                dismiss()
+            } else {
+                saveError = blurbStore.errorMessage ?? "Please try again."
+            }
+            isSaving = false
+        }
+    }
 }
 
 private struct BlurbMapAnnouncementView: View {
@@ -417,13 +1168,19 @@ private struct BlurbMapAnnouncementView: View {
 private struct HomeAudiencePicker: View {
     @Environment(\.dismiss) private var dismiss
     let groups: [BlurbGroup]
+    let answeredGroupIDs: Set<String>
     let apply: ([BlurbGroup]) async -> Bool
     @State private var selectedGroupIDs: Set<String>
     @State private var isApplying = false
     @State private var showingOverwriteWarning = false
 
-    init(groups: [BlurbGroup], apply: @escaping ([BlurbGroup]) async -> Bool) {
+    init(
+        groups: [BlurbGroup],
+        answeredGroupIDs: Set<String>,
+        apply: @escaping ([BlurbGroup]) async -> Bool
+    ) {
         self.groups = groups
+        self.answeredGroupIDs = answeredGroupIDs
         self.apply = apply
         _selectedGroupIDs = State(initialValue: Set(groups.map(\.id)))
     }
@@ -466,7 +1223,11 @@ private struct HomeAudiencePicker: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button {
-                        showingOverwriteWarning = true
+                        if selectedGroupIDs.isDisjoint(with: answeredGroupIDs) {
+                            submit()
+                        } else {
+                            showingOverwriteWarning = true
+                        }
                     } label: {
                         if isApplying {
                             ProgressView()
@@ -504,12 +1265,12 @@ private struct HomeAudiencePicker: View {
 private struct HomePromptCard: View {
     @Environment(\.colorScheme) private var colorScheme
     let prompt: DailyPrompt
+    let answeredAllGroups: Bool
+    let answerStatusLoaded: Bool
     let action: () -> Void
 
     private var accent: Color {
-        colorScheme == .dark
-            ? Color(red: 1, green: 0.78, blue: 0.02)
-            : Color(red: 0.78, green: 0.56, blue: 0.02)
+        Color(red: 1, green: 0.78, blue: 0.02)
     }
 
     private var ruleColor: Color {
@@ -537,13 +1298,37 @@ private struct HomePromptCard: View {
             Text(prompt.question)
                 .font(.system(size: 28, weight: .bold, design: .serif))
                 .fixedSize(horizontal: false, vertical: true)
-                HStack {
-                    Text("Tap to answer")
-                        .font(.caption.bold())
-                    Spacer()
-                    Image(systemName: "square.and.pencil")
+                Group {
+                    if answerStatusLoaded && answeredAllGroups {
+                        HStack(spacing: 8) {
+                            Image(systemName: "checkmark.circle.fill")
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text("ANSWERED TODAY")
+                                    .font(.caption.weight(.black))
+                                    .tracking(0.8)
+                                Text("View, edit, or delete your answers")
+                                    .font(.caption2.weight(.semibold))
+                            }
+                            Spacer(minLength: 4)
+                            Image(systemName: "chevron.right")
+                                .font(.caption.bold())
+                        }
+                        .foregroundStyle(.black)
+                        .padding(.horizontal, 12)
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                        .background(accent, in: RoundedRectangle(cornerRadius: 6))
+                    } else {
+                        HStack {
+                            Text(answerStatusLoaded ? "Tap to answer" : "Checking today's answers…")
+                                .font(.caption.bold())
+                            Spacer()
+                            Image(systemName: answerStatusLoaded ? "square.and.pencil" : "ellipsis")
+                        }
+                        .foregroundStyle(.secondary)
+                    }
                 }
-                .foregroundStyle(.secondary)
+                .frame(height: 44)
+                .clipped()
             }
             .foregroundStyle(.primary)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -556,22 +1341,219 @@ private struct HomePromptCard: View {
     }
 }
 
+private struct TodayAnswerTarget: Identifiable {
+    let group: BlurbGroup
+    let post: BlurbPost
+    var id: String { post.id }
+}
+
+private struct TodayAnswersView: View {
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var blurbStore: BlurbStore
+    let groups: [BlurbGroup]
+    let prompt: DailyPrompt
+    @State private var answersByGroup: [String: BlurbPost] = [:]
+    @State private var answerOverrides: [String: String] = [:]
+    @State private var isLoading = true
+    @State private var editTarget: TodayAnswerTarget?
+    @State private var deleteTarget: TodayAnswerTarget?
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                GlassBackground()
+
+                if isLoading {
+                    ProgressView("Loading your answers…")
+                } else if answersByGroup.isEmpty {
+                    ContentUnavailableView(
+                        "No answers yet",
+                        systemImage: "square.and.pencil",
+                        description: Text("Your answers will appear here after you post in a group.")
+                    )
+                } else {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 16) {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text("TODAY’S QUESTION")
+                                    .font(.caption.weight(.black))
+                                    .tracking(1.1)
+                                    .foregroundStyle(.black)
+                                    .padding(.horizontal, 9)
+                                    .padding(.vertical, 5)
+                                    .background(Color(red: 1, green: 0.78, blue: 0.02))
+                                Text(prompt.question)
+                                    .font(.system(size: 25, weight: .bold, design: .serif))
+                            }
+
+                            ForEach(groups) { group in
+                                if let post = answersByGroup[group.id] {
+                                    answerCard(post, in: group)
+                                }
+                            }
+                        }
+                        .padding()
+                    }
+                }
+            }
+            .navigationTitle("Today’s answers")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+            .task(id: prompt.id) {
+                await loadAnswers()
+            }
+            .sheet(item: $editTarget) { target in
+                NewPostView(
+                    prompt: target.post.prompt,
+                    initialAnswer: answerOverrides[target.post.id] ?? target.post.answer,
+                    themeSeed: target.group.name,
+                    pollOptions: target.post.pollOptions
+                ) { answer, _ in
+                    let saved = await blurbStore.editPost(target.post, answer: answer)
+                    if saved { answerOverrides[target.post.id] = answer }
+                    return saved
+                }
+                .presentationBackground(.ultraThinMaterial)
+            }
+            .confirmationDialog(
+                deleteTarget.map { "Delete your answer from \($0.group.name)?" } ?? "Delete this answer?",
+                isPresented: Binding(
+                    get: { deleteTarget != nil },
+                    set: { if !$0 { deleteTarget = nil } }
+                ),
+                titleVisibility: .visible
+            ) {
+                Button("Delete answer", role: .destructive) {
+                    guard let target = deleteTarget else { return }
+                    deleteTarget = nil
+                    Task {
+                        if await blurbStore.deletePost(target.post) {
+                            answersByGroup[target.group.id] = nil
+                            answerOverrides[target.post.id] = nil
+                        }
+                    }
+                }
+                Button("Keep answer", role: .cancel) { deleteTarget = nil }
+            } message: {
+                Text("Your answers in the other groups won’t be changed.")
+            }
+        }
+    }
+
+    private func answerCard(_ post: BlurbPost, in group: BlurbGroup) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text(group.name.uppercased())
+                    .font(.caption.weight(.black))
+                    .tracking(1)
+                Spacer()
+                if post.editedAt != nil {
+                    Text("EDITED")
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if let imageURL = post.imageURL {
+                BlurbAsyncImage(url: URL(string: imageURL)) { image in
+                    image.resizable().scaledToFill()
+                } placeholder: {
+                    Rectangle().fill(.quaternary)
+                }
+                .frame(height: 150)
+                .frame(maxWidth: .infinity)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
+
+            Text(answerOverrides[post.id] ?? post.answer)
+                .font(.system(.body, design: .serif).weight(.semibold))
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            HStack(spacing: 10) {
+                Button {
+                    editTarget = TodayAnswerTarget(group: group, post: post)
+                } label: {
+                    Label("Edit", systemImage: "pencil")
+                }
+                .buttonStyle(.bordered)
+
+                Button(role: .destructive) {
+                    deleteTarget = TodayAnswerTarget(group: group, post: post)
+                } label: {
+                    Label("Delete", systemImage: "trash")
+                }
+                .buttonStyle(.bordered)
+
+                Spacer()
+            }
+            .font(.subheadline.weight(.semibold))
+        }
+        .padding(16)
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 10))
+        .overlay {
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(.primary.opacity(0.22), lineWidth: 1)
+        }
+    }
+
+    private func loadAnswers() async {
+        var loaded: [String: BlurbPost] = [:]
+        for group in groups {
+            guard !Task.isCancelled else { return }
+            if let answer = await blurbStore.existingAnswer(promptID: prompt.id, in: group.id) {
+                loaded[group.id] = answer
+            }
+        }
+        answersByGroup = loaded
+        isLoading = false
+    }
+}
+
 private struct HomeGroupCard: View {
     @Environment(\.colorScheme) private var colorScheme
     @EnvironmentObject private var blurbStore: BlurbStore
     let group: BlurbGroup
+    @State private var members: [GroupMemberProfile] = []
+    @State private var avatarsExpanded = false
 
     private var accent: Color {
-        colorScheme == .dark
-            ? Color(red: 1, green: 0.78, blue: 0.02)
-            : Color(red: 0.78, green: 0.56, blue: 0.02)
+        Color(red: 1, green: 0.78, blue: 0.02)
     }
 
     private var ruleColor: Color {
         colorScheme == .dark ? Color.white.opacity(0.16) : .black
     }
 
+    private var displayedMembers: [GroupMemberProfile] {
+        let loadedByID = Dictionary(uniqueKeysWithValues: members.map { ($0.id, $0) })
+        var result = group.memberIDs.map { memberID in
+            loadedByID[memberID] ?? GroupMemberProfile(
+                id: memberID,
+                name: "Group member",
+                photoURL: nil
+            )
+        }
+        if group.isExample {
+            result += (0..<group.sampleParticipantCount).map { index in
+                GroupMemberProfile(
+                    id: "review-sample-\(index)",
+                    name: "Example participant",
+                    photoURL: nil
+                )
+            }
+        }
+        return result
+    }
+
     var body: some View {
+        let loadedCount = blurbStore.answerCountsByGroup[group.id]
+        let displayedCount = (loadedCount ?? 0) + group.sampleParticipantCount
+        let answeredMemberIDs = blurbStore.answeringMemberIDsByGroup[group.id] ?? []
+
         ZStack(alignment: .topLeading) {
             VibrantCardBackground(seed: group.name)
 
@@ -590,38 +1572,72 @@ private struct HomeGroupCard: View {
                     .background(accent)
 
                     Spacer(minLength: 0)
-                    if let answered = blurbStore.myAnswerStatusByGroup[group.id] {
-                        Image(systemName: answered ? "checkmark" : "circle")
-                            .font(.subheadline.weight(.bold))
-                            .foregroundStyle(accent)
-                            .accessibilityLabel(answered ? "You answered today" : "You have not answered today")
-                    }
+                    let answerStatus = blurbStore.myAnswerStatusByGroup[group.id]
+                    Image(systemName: answerStatus == true ? "checkmark" : "circle")
+                        .font(.subheadline.weight(.bold))
+                        .foregroundStyle(accent)
+                        .opacity(answerStatus == nil ? 0 : 1)
+                        .accessibilityHidden(answerStatus == nil)
+                        .accessibilityLabel(answerStatus == true ? "You answered today" : "You have not answered today")
                 }
 
                 Divider()
                     .overlay(Color.primary.opacity(0.35))
                     .padding(.top, 7)
-                    .padding(.bottom, 10)
+                    .padding(.bottom, 6)
 
                 HStack(alignment: .bottom) {
                     VStack(alignment: .leading, spacing: 5) {
-                        Text("\(blurbStore.displayedAnswerCount(in: group))/\(group.displayedParticipantCount)")
-                            .font(.title.bold())
-                        Text(group.isExample ? "today · includes \(group.sampleParticipantCount) examples" : "answered today")
-                            .font(.subheadline.weight(.medium))
-                    }
+                        ScrollView(.horizontal) {
+                            HStack(spacing: avatarsExpanded ? 4 : -7) {
+                                ForEach(displayedMembers) { member in
+                                    let isSample = member.id.hasPrefix("review-sample-")
+                                    HomeAnswerAvatar(
+                                        member: member,
+                                        answered: isSample || answeredMemberIDs.contains(member.id),
+                                        accent: accent
+                                    )
+                                    .zIndex(isSample || answeredMemberIDs.contains(member.id) ? 1 : 0)
+                                }
+                            }
+                            .padding(.horizontal, 2)
+                            .padding(.vertical, 2)
+                            .animation(BlurbMotion.interactive, value: avatarsExpanded)
+                        }
+                        .scrollIndicators(.hidden)
+                        .frame(height: 38)
+                        .contentShape(Rectangle())
+                        .highPriorityGesture(
+                            TapGesture().onEnded {
+                                guard !avatarsExpanded else { return }
+                                withAnimation(BlurbMotion.interactive) {
+                                    avatarsExpanded = true
+                                }
+                            }
+                        )
+                        .task(id: avatarsExpanded) {
+                            guard avatarsExpanded else { return }
+                            try? await Task.sleep(for: .seconds(2))
+                            guard !Task.isCancelled else { return }
+                            withAnimation(BlurbMotion.interactive) {
+                                avatarsExpanded = false
+                            }
+                        }
 
+                        Text("answered today")
+                            .font(.subheadline.weight(.medium))
+                            .redacted(reason: loadedCount == nil ? .placeholder : [])
+                    }
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(loadedCount == nil
+                                        ? "Checking who answered today"
+                                        : "\(displayedCount) of \(group.displayedParticipantCount) answered today")
                     Spacer()
 
                     Image(systemName: "arrow.up.right")
                         .font(.title3.bold())
                         .frame(width: 44, height: 44)
-                        .background(
-                            colorScheme == .dark
-                                ? Color(red: 1, green: 0.78, blue: 0.02)
-                                : Color(red: 0.78, green: 0.56, blue: 0.02),
-                            in: Circle()
-                        )
+                        .background(accent, in: Circle())
                         .foregroundStyle(.black)
                 }
                 .foregroundStyle(.primary)
@@ -631,6 +1647,31 @@ private struct HomeGroupCard: View {
         .frame(height: 142)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay { RoundedRectangle(cornerRadius: 8).stroke(ruleColor, lineWidth: 2) }
+        .task(id: "\(group.id)-\(group.memberIDs.count)") {
+            members = await blurbStore.loadMemberProfiles(
+                in: group.id,
+                includeMonthlyProgress: false
+            )
+        }
+    }
+}
+
+private struct HomeAnswerAvatar: View {
+    let member: GroupMemberProfile
+    let answered: Bool
+    let accent: Color
+
+    var body: some View {
+        ProfilePhoto(urlString: member.photoURL, size: 30)
+            .grayscale(answered ? 0 : 1)
+            .opacity(answered ? 1 : 0.28)
+            .overlay {
+                Circle()
+                    .stroke(answered ? accent : Color.secondary.opacity(0.35), lineWidth: answered ? 2.5 : 1)
+            }
+            .background(Color(uiColor: .systemBackground), in: Circle())
+            .accessibilityLabel(member.name)
+            .accessibilityValue(answered ? "Answered today" : "Has not answered today")
     }
 }
 
@@ -644,11 +1685,7 @@ private struct VibrantCardBackground: View {
                 ? Color(red: 0.14, green: 0.14, blue: 0.14)
                 : Color(red: 0.985, green: 0.975, blue: 0.93)
             Rectangle()
-                .fill(
-                    colorScheme == .dark
-                        ? Color(red: 1, green: 0.78, blue: 0.02)
-                        : Color(red: 0.78, green: 0.56, blue: 0.02)
-                )
+                .fill(Color(red: 1, green: 0.78, blue: 0.02))
                 .frame(width: 12)
                 .frame(maxWidth: .infinity, alignment: .leading)
             VStack(spacing: 5) {
@@ -662,8 +1699,150 @@ private struct VibrantCardBackground: View {
     }
 }
 
+private struct GroupMembersView: View {
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @EnvironmentObject private var auth: AuthManager
+    @EnvironmentObject private var blurbStore: BlurbStore
+    let group: BlurbGroup
+    @State private var members: [GroupMemberProfile] = []
+    @State private var isLoading = true
+    @State private var nudgingMemberIDs: Set<String> = []
+    @State private var nudgedMemberIDs: Set<String> = []
+    @State private var nudgeAlertTitle = ""
+    @State private var nudgeAlertMessage = ""
+    @State private var showingNudgeAlert = false
+
+    private var canManageGroup: Bool { auth.user?.uid == group.ownerID }
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if isLoading {
+                    ProgressView("Loading members…")
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if members.isEmpty {
+                    ContentUnavailableView(
+                        "Members unavailable",
+                        systemImage: "person.2.slash",
+                        description: Text("Member profiles couldn't be loaded right now."))
+                } else {
+                    List(members) { member in
+                        HStack(spacing: 10) {
+                            ProfilePhoto(urlString: member.photoURL, size: 38)
+
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack(spacing: 7) {
+                                    Text(member.name)
+                                        .font(.headline)
+                                        .lineLimit(1)
+                                    if member.id == group.ownerID {
+                                        Text("OWNER")
+                                            .font(.caption2.weight(.semibold))
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+
+                                HStack(spacing: 13) {
+                                    monthlyProgressLabel(
+                                        systemImage: "questionmark.circle",
+                                        value: "\(member.newsletterAnsweredCount)/\(member.newsletterQuestionCount)",
+                                        description: "monthly questions answered"
+                                    )
+                                    monthlyProgressLabel(
+                                        systemImage: "photo",
+                                        value: "\(member.hasPhotoOfMonth ? 1 : 0)/1",
+                                        description: "Photo of the Month selected"
+                                    )
+                                }
+                            }
+
+                            Spacer(minLength: 4)
+
+                            if canManageGroup,
+                               member.id != auth.user?.uid,
+                               !member.hasFinishedMonthlyProgress {
+                                Button {
+                                    sendNudge(to: member)
+                                } label: {
+                                    if nudgingMemberIDs.contains(member.id) {
+                                        ProgressView()
+                                            .controlSize(.small)
+                                    } else {
+                                        Image(systemName: nudgedMemberIDs.contains(member.id) ? "checkmark" : "bell")
+                                            .contentTransition(.symbolEffect(.replace))
+                                    }
+                                }
+                                .font(.caption.weight(.semibold))
+                                .buttonStyle(.bordered)
+                                .buttonBorderShape(.circle)
+                                .controlSize(.small)
+                                .disabled(nudgingMemberIDs.contains(member.id) || nudgedMemberIDs.contains(member.id))
+                                .animation(reduceMotion ? nil : BlurbMotion.quick, value: nudgedMemberIDs.contains(member.id))
+                                .accessibilityLabel(nudgedMemberIDs.contains(member.id)
+                                                    ? "Nudge sent to \(member.name)"
+                                                    : "Nudge \(member.name)")
+                            }
+                        }
+                        .listRowInsets(EdgeInsets(top: 7, leading: 14, bottom: 7, trailing: 14))
+                    }
+                    .listStyle(.insetGrouped)
+                }
+            }
+            .navigationTitle("\(group.memberCount) \(group.memberCount == 1 ? "Member" : "Members")")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+            .task {
+                let loadedMembers = await blurbStore.loadMemberProfiles(in: group.id)
+                // Replace the loading state atomically. Animating the entire list here
+                // causes two full-screen render trees to overlap and creates ghosting.
+                members = loadedMembers
+                isLoading = false
+            }
+            .alert(nudgeAlertTitle, isPresented: $showingNudgeAlert) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(nudgeAlertMessage)
+            }
+        }
+    }
+
+    private func monthlyProgressLabel(systemImage: String, value: String, description: String) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: systemImage)
+            Text(value)
+                .monospacedDigit()
+        }
+        .font(.caption.weight(.medium))
+        .foregroundStyle(.secondary)
+        .accessibilityLabel("\(value) \(description)")
+    }
+
+    private func sendNudge(to member: GroupMemberProfile) {
+        nudgingMemberIDs.insert(member.id)
+        Task {
+            let sent = await blurbStore.nudgeMonthlyProgress(for: member.id, in: group.id)
+            nudgingMemberIDs.remove(member.id)
+            if sent {
+                nudgedMemberIDs.insert(member.id)
+                nudgeAlertTitle = "Nudge sent"
+                nudgeAlertMessage = "\(member.name) was reminded to finish their monthly check-in."
+            } else {
+                nudgeAlertTitle = "Couldn’t send nudge"
+                nudgeAlertMessage = blurbStore.errorMessage ?? "Please try again in a moment."
+            }
+            showingNudgeAlert = true
+        }
+    }
+}
+
 private struct GroupFeedView: View {
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @EnvironmentObject private var auth: AuthManager
     @EnvironmentObject private var blurbStore: BlurbStore
     @State private var showingNewPost = false
@@ -673,6 +1852,7 @@ private struct GroupFeedView: View {
     @State private var answerToReuse: String?
     @State private var imageToReuse: Data?
     @State private var showingReuseOptions = false
+    @State private var showingMembers = false
     @State private var dailyPromptClock = Date.now
     @AppStorage("birthdayQuestionsEnabled") private var birthdayQuestionsEnabled = false
     @AppStorage("birthdayQuestion") private var birthdayQuestion = ""
@@ -706,10 +1886,25 @@ private struct GroupFeedView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
+                Button { showingMembers = true } label: {
+                    Image(systemName: "person.2.fill")
+                }
+                .accessibilityLabel("View members of \(group.name)")
+
                 NavigationLink {
                     PhotoOfMonthPickerView(group: group)
                 } label: {
                     Image(systemName: "photo.badge.plus")
+                        .overlay(alignment: .topTrailing) {
+                            if blurbStore.photoOfMonthSelectionsLoaded
+                                && blurbStore.photoOfMonthSelection(in: group.id) == nil {
+                                Circle()
+                                    .fill(.red)
+                                    .frame(width: 9, height: 9)
+                                    .overlay(Circle().stroke(Color(uiColor: .systemBackground), lineWidth: 1.5))
+                                    .offset(x: 4, y: -3)
+                            }
+                        }
                 }
                 .accessibilityLabel("Choose Photo of the Month")
 
@@ -721,7 +1916,14 @@ private struct GroupFeedView: View {
                 .accessibilityLabel("\(group.name) newsletter")
             }
         }
-        .onAppear { blurbStore.select(group) }
+        .onAppear {
+            blurbStore.select(group)
+        }
+        .sheet(isPresented: $showingMembers) {
+            GroupMembersView(group: group)
+                .presentationDetents([.medium, .large])
+                .presentationBackground(.ultraThinMaterial)
+        }
         .onChange(of: blurbStore.hasAnswered(promptID: todayPrompt.id, in: group.id)) { _, answered in
             if !answered {
                 selectedPost = nil
@@ -809,11 +2011,7 @@ private struct GroupFeedView: View {
                             .foregroundStyle(.black)
                             .padding(.horizontal, 10)
                             .padding(.vertical, 6)
-                            .background(
-                                colorScheme == .dark
-                                    ? Color(red: 1, green: 0.78, blue: 0.02)
-                                    : Color(red: 0.78, green: 0.56, blue: 0.02)
-                            )
+                            .background(Color(red: 1, green: 0.78, blue: 0.02))
                     } else {
                         HStack {
                             Text("Tap to answer")
@@ -840,7 +2038,7 @@ private struct GroupFeedView: View {
 
             if let answer = blurbStore.answer(for: todayPrompt.id, in: group.id) {
                 Button {
-                    withAnimation(.easeInOut(duration: 0.3)) {
+                    withAnimation(reduceMotion ? nil : BlurbMotion.standard) {
                         proxy.scrollTo(answer.id, anchor: .top)
                     }
                 } label: {
@@ -947,6 +2145,7 @@ private let moderationReportReasons = [
 
 struct PostCard: View {
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @EnvironmentObject private var blurbStore: BlurbStore
     let post: BlurbPost
     let currentUserID: String?
@@ -991,7 +2190,7 @@ struct PostCard: View {
             }
 
             if let imageURL = post.imageURL {
-                AsyncImage(url: URL(string: imageURL)) { image in
+                BlurbAsyncImage(url: URL(string: imageURL)) { image in
                     image
                         .resizable()
                         .scaledToFill()
@@ -1117,7 +2316,10 @@ struct PostCard: View {
                 Button(action: toggleLike) {
                     HStack(spacing: 6) {
                         Image(systemName: post.likeIDs.contains(currentUserID ?? "") ? "heart.fill" : "heart")
-                        Text("\(post.likeCount)").font(.caption.monospacedDigit())
+                            .contentTransition(.symbolEffect(.replace))
+                        Text("\(post.likeCount)")
+                            .font(.caption.monospacedDigit())
+                            .contentTransition(.numericText(value: Double(post.likeCount)))
                     }
                     .foregroundStyle(post.likeIDs.contains(currentUserID ?? "") ? .red : .secondary)
                     .frame(minWidth: 44, minHeight: 44)
@@ -1125,11 +2327,14 @@ struct PostCard: View {
                 }
                 .accessibilityLabel(post.likeIDs.contains(currentUserID ?? "") ? "Unlike answer" : "Like answer")
                 .accessibilityValue("\(post.likeCount) likes")
+                .animation(reduceMotion ? nil : BlurbMotion.quick, value: post.likeCount)
 
                 Button(action: showComments) {
                     HStack(spacing: 6) {
                         Image(systemName: "bubble.right")
-                        Text("\(post.commentCount)").font(.caption.monospacedDigit())
+                        Text("\(post.commentCount)")
+                            .font(.caption.monospacedDigit())
+                            .contentTransition(.numericText(value: Double(post.commentCount)))
                     }
                     .foregroundStyle(replyAccent)
                     .frame(minWidth: 44, minHeight: 44)
@@ -1137,6 +2342,7 @@ struct PostCard: View {
                 }
                 .accessibilityLabel("Open replies")
                 .accessibilityValue("\(post.commentCount) replies")
+                .animation(reduceMotion ? nil : BlurbMotion.quick, value: post.commentCount)
                 Spacer(minLength: 0)
         }
         .font(.subheadline)
@@ -1209,7 +2415,7 @@ struct PostCard: View {
     private var postMetadata: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             if let rankColor {
-                Label(placementLabel ?? "", systemImage: "medal.fill")
+                Image(systemName: "medal.fill")
                     .foregroundStyle(rankColor)
                     .accessibilityLabel(placementLabel ?? "Ranked answer")
             }
@@ -1227,7 +2433,7 @@ struct PostCard: View {
     }
 
     private var replyAccent: Color {
-        colorScheme == .dark ? Color(red: 1, green: 0.78, blue: 0.02) : Color(red: 0.68, green: 0.48, blue: 0)
+        Color(red: 1, green: 0.78, blue: 0.02)
     }
 
     private var commentTabFill: Color {
@@ -1241,7 +2447,6 @@ struct PostCard: View {
         case 1: return Color(red: 0.92, green: 0.68, blue: 0.05)
         case 2: return Color.gray
         case 3: return Color(red: 0.65, green: 0.38, blue: 0.18)
-        case 4...: return .secondary
         default: return nil
         }
     }
@@ -1255,10 +2460,6 @@ struct PostCard: View {
         case 1: return "1st"
         case 2: return "2nd"
         case 3: return "3rd"
-        case 4...:
-            let formatter = NumberFormatter()
-            formatter.numberStyle = .ordinal
-            return formatter.string(from: NSNumber(value: currentRank))
         default: return nil
         }
     }
@@ -1340,9 +2541,7 @@ private struct GrowingAnswerField: UIViewRepresentable {
         textView.delegate = context.coordinator
         textView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        DispatchQueue.main.async {
-            context.coordinator.updateHeight(for: textView)
-        }
+        context.coordinator.scheduleHeightUpdate(for: textView)
         return textView
     }
 
@@ -1350,15 +2549,14 @@ private struct GrowingAnswerField: UIViewRepresentable {
         if textView.text != text {
             textView.text = text
         }
-        DispatchQueue.main.async {
-            context.coordinator.updateHeight(for: textView)
-        }
+        context.coordinator.scheduleHeightUpdate(for: textView)
     }
 
     func makeCoordinator() -> Coordinator { Coordinator(field: self) }
 
     final class Coordinator: NSObject, UITextViewDelegate {
         private var field: GrowingAnswerField
+        private var heightUpdateScheduled = false
 
         init(field: GrowingAnswerField) {
             self.field = field
@@ -1367,6 +2565,15 @@ private struct GrowingAnswerField: UIViewRepresentable {
         func textViewDidChange(_ textView: UITextView) {
             field.text = textView.text
             updateHeight(for: textView)
+        }
+
+        func scheduleHeightUpdate(for textView: UITextView) {
+            guard !heightUpdateScheduled else { return }
+            heightUpdateScheduled = true
+            DispatchQueue.main.async {
+                self.heightUpdateScheduled = false
+                self.updateHeight(for: textView)
+            }
         }
 
         func updateHeight(for textView: UITextView) {
@@ -1378,16 +2585,13 @@ private struct GrowingAnswerField: UIViewRepresentable {
             textView.isScrollEnabled = fittingHeight > field.maximumHeight
 
             guard abs(field.height - newHeight) > 0.5 else { return }
-            DispatchQueue.main.async {
-                withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
-                    self.field.height = newHeight
-                }
-            }
+            field.height = newHeight
         }
     }
 }
 
 struct NewPostView: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @EnvironmentObject private var blurbStore: BlurbStore
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
@@ -1402,6 +2606,7 @@ struct NewPostView: View {
     let themeSeed: String
     let requiresPhoto: Bool
     let pollOptions: [String]
+    let isNewsletterAnswer: Bool
     let onPost: (String, Data?) async -> Bool
 
     init(
@@ -1410,6 +2615,7 @@ struct NewPostView: View {
         themeSeed: String,
         requiresPhoto: Bool = false,
         pollOptions: [String] = [],
+        isNewsletterAnswer: Bool = false,
         onPost: @escaping (String, Data?) async -> Bool
     ) {
         self.prompt = prompt
@@ -1417,6 +2623,7 @@ struct NewPostView: View {
         self.themeSeed = themeSeed
         self.requiresPhoto = requiresPhoto
         self.pollOptions = pollOptions
+        self.isNewsletterAnswer = isNewsletterAnswer
         self.onPost = onPost
         _answer = State(initialValue: initialAnswer ?? "")
     }
@@ -1487,7 +2694,7 @@ struct NewPostView: View {
                         )
 
                         Button {
-                            if initialAnswer == nil {
+                            if initialAnswer == nil || isNewsletterAnswer {
                                 submitAnswer()
                             } else {
                                 showingEditWarning = true
@@ -1516,7 +2723,6 @@ struct NewPostView: View {
                         .opacity(canSubmit ? 1 : 0.36)
                         .accessibilityLabel(initialAnswer == nil ? "Post answer" : "Save edited answer")
                     }
-                    .animation(.spring(response: 0.32, dampingFraction: 0.82), value: composerHeight)
                     } else {
                         VStack(spacing: 10) {
                             ForEach(pollOptions, id: \.self) { option in
@@ -1529,6 +2735,7 @@ struct NewPostView: View {
                                         Spacer()
                                         Image(systemName: answer == option ? "checkmark.circle.fill" : "circle")
                                             .font(.title3)
+                                            .contentTransition(.symbolEffect(.replace))
                                     }
                                     .foregroundStyle(.primary)
                                     .padding(15)
@@ -1540,10 +2747,11 @@ struct NewPostView: View {
                                     )
                                 }
                                 .buttonStyle(.plain)
+                                .animation(reduceMotion ? nil : BlurbMotion.quick, value: answer == option)
                             }
 
                             Button(initialAnswer == nil ? "Submit vote" : "Save vote") {
-                                if initialAnswer == nil {
+                                if initialAnswer == nil || isNewsletterAnswer {
                                     submitAnswer()
                                 } else {
                                     showingEditWarning = true
@@ -1555,9 +2763,11 @@ struct NewPostView: View {
                         }
                     }
 
-                    Text(initialAnswer == nil
-                         ? "Once you post, your answer counts toward today’s streak."
-                         : "You can edit once per day. Editing refreshes the timestamp, removes this answer from your streak, and may cost your first-place badge.")
+                    Text(isNewsletterAnswer
+                         ? "Newsletter answers earn no points or streak credit and stay editable through month-end."
+                         : (initialAnswer == nil
+                            ? "Once you post, your answer counts toward today’s streak."
+                            : "You can edit once per day. Editing refreshes the timestamp, removes this answer from your streak, and may cost your first-place badge."))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
@@ -1571,7 +2781,7 @@ struct NewPostView: View {
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button(initialAnswer == nil ? "Post" : "Save") {
-                        if initialAnswer == nil { submitAnswer() }
+                        if initialAnswer == nil || isNewsletterAnswer { submitAnswer() }
                         else { showingEditWarning = true }
                     }
                     .disabled(!canSubmit)
@@ -1583,7 +2793,9 @@ struct NewPostView: View {
                 }
                 ToolbarItem(placement: .principal) {
                     HStack(spacing: 7) {
-                        Text(initialAnswer == nil ? "Answer today" : "Edit answer")
+                        Text(isNewsletterAnswer
+                             ? (initialAnswer == nil ? "Newsletter answer" : "Edit newsletter answer")
+                             : (initialAnswer == nil ? "Answer today" : "Edit answer"))
                             .font(.headline)
                         Text(Date.now.formatted(.dateTime.month(.abbreviated).day()))
                             .font(.subheadline)
@@ -1645,7 +2857,7 @@ struct CommentsView: View {
     }
 
     private var accent: Color {
-        colorScheme == .dark ? Color(red: 1, green: 0.78, blue: 0.02) : Color(red: 0.78, green: 0.56, blue: 0.02)
+        Color(red: 1, green: 0.78, blue: 0.02)
     }
 
     private var borderColor: Color {
@@ -1721,7 +2933,7 @@ struct CommentsView: View {
                 .font(.system(.subheadline, design: .serif))
                 .lineSpacing(2)
             if let imageURL = post.imageURL {
-                AsyncImage(url: URL(string: imageURL)) { image in
+                BlurbAsyncImage(url: URL(string: imageURL)) { image in
                     image.resizable().scaledToFit()
                 } placeholder: { ProgressView() }
                 .frame(maxHeight: 150)
@@ -2101,6 +3313,7 @@ struct CreateGroupView: View {
 }
 
 struct FloatingDock: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Binding var selection: AppTab
     let namespace: Namespace.ID
 
@@ -2108,7 +3321,7 @@ struct FloatingDock: View {
         HStack(spacing: 7) {
             ForEach(AppTab.allCases) { tab in
                 Button {
-                    withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
+                    withAnimation(reduceMotion ? nil : BlurbMotion.interactive) {
                         selection = tab
                     }
                 } label: {
@@ -2273,14 +3486,19 @@ struct ProfilePhoto: View {
     let size: CGFloat
 
     var body: some View {
-        AsyncImage(url: URL(string: urlString ?? "")) { image in
-            image.resizable().scaledToFill()
-        } placeholder: {
-            Image(systemName: "person.crop.circle.fill")
-                .resizable()
-                .scaledToFit()
-                .foregroundStyle(.indigo.gradient)
-                .padding(size * 0.08)
+        AsyncImage(url: URL(string: urlString ?? "")) { phase in
+            switch phase {
+            case .success(let image):
+                image
+                    .resizable()
+                    .scaledToFill()
+            default:
+                Image(systemName: "person.crop.circle.fill")
+                    .resizable()
+                    .scaledToFit()
+                    .foregroundStyle(.indigo.gradient)
+                    .padding(size * 0.08)
+            }
         }
         .frame(width: size, height: size)
         .fixedSize()
@@ -2294,7 +3512,7 @@ struct EditProfileView: View {
     @State private var existingPhotoURL: String?
     @EnvironmentObject private var blurbStore: BlurbStore
     @State private var name = ""
-    @State private var photoItem: PhotosPickerItem?
+    @State private var showingPhotoCropper = false
     @State private var photoData: Data?
     @State private var isSaving = false
     @State private var saveError: String?
@@ -2305,7 +3523,7 @@ struct EditProfileView: View {
                 Section {
                     HStack {
                         Spacer()
-                        PhotosPicker(selection: $photoItem, matching: .images) {
+                        Button { showingPhotoCropper = true } label: {
                             Group {
                                 if let photoData, let image = UIImage(data: photoData) {
                                     Image(uiImage: image)
@@ -2325,6 +3543,7 @@ struct EditProfileView: View {
                                         .background(.indigo, in: Circle())
                                 }
                         }
+                        .buttonStyle(.plain)
                         Spacer()
                     }
                     .listRowBackground(Color.clear)
@@ -2361,6 +3580,12 @@ struct EditProfileView: View {
                 name = blurbStore.profile.displayName
                 existingPhotoURL = blurbStore.profile.photoURL
             }
+            .sheet(isPresented: $showingPhotoCropper) {
+                CroppedProfilePhotoPicker(isPresented: $showingPhotoCropper) { croppedData in
+                    photoData = croppedData
+                }
+                .ignoresSafeArea()
+            }
             .alert("Couldn't save profile", isPresented: Binding(
                 get: { saveError != nil },
                 set: { if !$0 { saveError = nil } }
@@ -2368,12 +3593,6 @@ struct EditProfileView: View {
                 Button("OK", role: .cancel) { saveError = nil }
             } message: {
                 Text(saveError ?? "")
-            }
-            .onChange(of: photoItem) { _, item in
-                Task {
-                    guard let original = try? await item?.loadTransferable(type: Data.self) else { return }
-                    photoData = preparedJPEG(from: original, maxDimension: 1_024)
-                }
             }
         }
     }
@@ -2391,6 +3610,7 @@ struct StatCard: View {
                 .foregroundStyle(color)
             Text(value)
                 .font(.title2.bold())
+                .monospacedDigit()
             Text(label)
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -2447,6 +3667,95 @@ struct BadgeRow: View {
     }
 }
 
+private struct QuestionRulesView: View {
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                GlassBackground()
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 18) {
+                        Text("How Blurb questions work")
+                            .font(.system(size: 32, weight: .bold, design: .serif))
+                        Text("Daily conversations and monthly newsletter questions run side by side. Answering one never completes the other.")
+                            .foregroundStyle(.secondary)
+
+                        rule(
+                            icon: "sun.max.fill",
+                            title: "Every day — Daily Blurb",
+                            text: "One shared daily question appears at 5:00 AM Pacific. Answer it separately in each group to unlock that group’s conversation. Daily answers can earn placement points and streak credit."
+                        )
+                        rule(
+                            icon: "brain.head.profile",
+                            title: "Thursdays — Trivia",
+                            text: "The first four Thursdays can use a trivia question as that day’s Daily Blurb. It follows the normal daily-answer rules."
+                        )
+                        rule(
+                            icon: "newspaper.fill",
+                            title: "Fridays — Newsletter question",
+                            text: "One separate newsletter question unlocks on each of the first four Fridays. Released questions stay available through month-end. You can reuse one answer across groups or write a different answer for each group."
+                        )
+                        rule(
+                            icon: "plus.bubble.fill",
+                            title: "Optional group questions",
+                            text: "Any member can add extra newsletter questions for one specific group. They appear after the official questions, stay inside that group, and cannot be reused in another group."
+                        )
+                        rule(
+                            icon: "pencil.and.outline",
+                            title: "Editing newsletter answers",
+                            text: "Newsletter answers can be edited as often as needed through the end of the month. They never earn points, placement medals, or streak credit. Your Daily Blurb still needs its own answer."
+                        )
+                        rule(
+                            icon: "photo.badge.plus",
+                            title: "Photo of the Month",
+                            text: "Choose one photo privately for each group. You can change it during the month; it is revealed when the finished newsletter is published."
+                        )
+                        rule(
+                            icon: "sparkles.rectangle.stack.fill",
+                            title: "What goes into the newsletter",
+                            text: "The finished edition includes answers to the four Friday questions and any group-added questions, each member’s Photo of the Month, and monthly highlights such as participation, points, reactions, and cities."
+                        )
+
+                        Text("Friday notifications use your Daily Blurb reminder setting. Notifications must also be allowed in iPhone Settings.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .padding(.top, 2)
+                    }
+                    .padding()
+                }
+            }
+            .navigationTitle("Question rules")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+    }
+
+    private func rule(icon: String, title: String, text: String) -> some View {
+        HStack(alignment: .top, spacing: 13) {
+            Image(systemName: icon)
+                .font(.headline)
+                .foregroundStyle(.black)
+                .frame(width: 38, height: 38)
+                .background(Color(red: 1, green: 0.78, blue: 0.02), in: Circle())
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.system(.headline, design: .serif).bold())
+                Text(text)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
 struct SettingsView: View {
     @EnvironmentObject private var auth: AuthManager
     @EnvironmentObject private var blurbStore: BlurbStore
@@ -2465,6 +3774,8 @@ struct SettingsView: View {
     @State private var isDeletingAccount = false
     @State private var reminderErrorMessage: String?
     @State private var currentCityName: String?
+    @State private var showingQuestionRules = false
+    @State private var isRefreshingCity = false
 
     var body: some View {
         NavigationStack {
@@ -2484,6 +3795,34 @@ struct SettingsView: View {
                             }
                             .pickerStyle(.segmented)
                         }
+
+                        Button { showingQuestionRules = true } label: {
+                            HStack(spacing: 14) {
+                                Image(systemName: "questionmark.bubble.fill")
+                                    .font(.title2)
+                                    .foregroundStyle(Color(red: 0.88, green: 0.64, blue: 0.02))
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text("HOW QUESTIONS WORK")
+                                        .font(.caption.weight(.black))
+                                        .tracking(1)
+                                    Text("Daily, trivia, newsletter, and monthly rules")
+                                        .font(.subheadline)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Image(systemName: "chevron.right")
+                                    .font(.caption.bold())
+                                    .foregroundStyle(.secondary)
+                            }
+                            .foregroundStyle(.primary)
+                            .padding(16)
+                            .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 8))
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 8)
+                                    .stroke(.primary.opacity(0.3), lineWidth: 1)
+                            }
+                        }
+                        .buttonStyle(.plain)
 
                         settingsCard(title: "GROUPS") {
                             if blurbStore.groups.isEmpty {
@@ -2550,9 +3889,27 @@ struct SettingsView: View {
                                 .onChange(of: cityLocationEnabled) { _, enabled in
                                     updateCityLocation(enabled: enabled)
                                 }
-                            Text(currentCityName.map { "New Blurbs will show \($0)." } ?? "Optional and off by default. Daily Blurb converts your location to city, region, and country on your phone; precise coordinates are never saved.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                                Text(currentCityName.map { "New Blurbs will show \($0)." } ?? "Optional and off by default. Daily Blurb converts your location to city, region, and country on your phone; precise coordinates are never saved.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Spacer(minLength: 4)
+                                if cityLocationEnabled {
+                                    Button {
+                                        refreshCityLocation()
+                                    } label: {
+                                        if isRefreshingCity {
+                                            ProgressView()
+                                                .controlSize(.small)
+                                        } else {
+                                            Label("Refresh", systemImage: "arrow.clockwise")
+                                        }
+                                    }
+                                    .font(.caption.bold())
+                                    .disabled(isRefreshingCity)
+                                    .accessibilityLabel("Refresh current city")
+                                }
+                            }
                         }
 
                         settingsCard(title: "REPORTS") {
@@ -2648,6 +4005,11 @@ struct SettingsView: View {
             }
             .sheet(item: $groupToRename) { group in
                 RenameGroupView(group: group)
+                    .presentationBackground(.ultraThinMaterial)
+            }
+            .sheet(isPresented: $showingQuestionRules) {
+                QuestionRulesView()
+                    .presentationDetents([.large])
                     .presentationBackground(.ultraThinMaterial)
             }
             .alert("\(copiedItem) copied", isPresented: Binding(
@@ -2747,6 +4109,19 @@ struct SettingsView: View {
                 cityLocationEnabled = false
                 reminderErrorMessage = "City sharing needs Location access. Enable it in iPhone Settings, then try again."
             }
+        }
+    }
+
+    private func refreshCityLocation() {
+        guard !isRefreshingCity else { return }
+        isRefreshingCity = true
+        Task {
+            if let city = await CityLocationProvider.shared.refreshCity() {
+                currentCityName = city.displayName
+            } else {
+                reminderErrorMessage = "Your current city couldn’t be refreshed. Check Location access in iPhone Settings and try again."
+            }
+            isRefreshingCity = false
         }
     }
 
@@ -3026,34 +4401,62 @@ private struct EarnedBadgeLabel: View {
     @ScaledMetric(relativeTo: .caption2) private var textSize: CGFloat = 9
 
     var body: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 3) {
             AnimatedBadgeIcon(systemName: tier.icon)
             Text(tier.title.uppercased())
                 .tracking(0.5)
         }
         .font(.system(size: textSize, weight: .black, design: .serif))
-        .foregroundStyle(.black)
-        .padding(.horizontal, 6)
-        .padding(.vertical, 3)
-        .background(Color(red: 1, green: 0.78, blue: 0.02))
+        .foregroundStyle(Color(red: 0.88, green: 0.64, blue: 0.02))
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(tier.title)
     }
 }
 
 private struct EarnedBadges: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let progress: [AchievementProgress]
+    @State private var expandedIndex: Int?
+    @State private var collapseTask: Task<Void, Never>?
+
+    private var earned: [AchievementTier] {
+        progress.compactMap(\.earned)
+    }
+
     var body: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 4) {
-                ForEach(progress.filter { $0.earned != nil }) { item in
-                    EarnedBadgeLabel(tier: item.earned!)
-                        .fixedSize(horizontal: true, vertical: false)
+        HStack(spacing: 4) {
+            ForEach(Array(earned.enumerated()), id: \.offset) { index, tier in
+                Button {
+                    expandBadge(at: index)
+                } label: {
+                    if expandedIndex == index {
+                        EarnedBadgeLabel(tier: tier)
+                            .fixedSize(horizontal: true, vertical: false)
+                    } else {
+                        AnimatedBadgeIcon(systemName: tier.icon)
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(Color(red: 0.88, green: 0.64, blue: 0.02))
+                            .frame(width: 15, height: 18)
+                            .accessibilityLabel(tier.title)
+                    }
                 }
+                .buttonStyle(.plain)
             }
-            VStack(alignment: .leading, spacing: 4) {
-                ForEach(progress.filter { $0.earned != nil }) { item in
-                    EarnedBadgeLabel(tier: item.earned!)
+        }
+        .onDisappear { collapseTask?.cancel() }
+    }
+
+    private func expandBadge(at index: Int) {
+        collapseTask?.cancel()
+        withAnimation(reduceMotion ? nil : BlurbMotion.quick) {
+            expandedIndex = index
+        }
+        collapseTask = Task {
+            try? await Task.sleep(for: .seconds(2))
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                withAnimation(reduceMotion ? nil : BlurbMotion.quick) {
+                    expandedIndex = nil
                 }
             }
         }
@@ -3233,7 +4636,7 @@ private struct MemberProfileSheet: View {
                     }
                     .sheet(isPresented: $expandedPhoto) {
                         NavigationStack {
-                            AsyncImage(url: URL(string: member.photoURL ?? "")) { image in
+                            BlurbAsyncImage(url: URL(string: member.photoURL ?? "")) { image in
                                 image.resizable().scaledToFit()
                             } placeholder: { ProgressView() }
                             .padding()
@@ -3271,6 +4674,7 @@ private struct MemberProfileSheet: View {
 
 
 private struct ReplyLikeButton: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @EnvironmentObject private var auth: AuthManager
     @EnvironmentObject private var blurbStore: BlurbStore
     @State private var updating = false
@@ -3289,7 +4693,10 @@ private struct ReplyLikeButton: View {
         } label: {
             HStack(spacing: 4) {
                 Image(systemName: liked ? "heart.fill" : "heart")
-                Text("\(comment.likeIDs.count)").monospacedDigit()
+                    .contentTransition(.symbolEffect(.replace))
+                Text("\(comment.likeIDs.count)")
+                    .monospacedDigit()
+                    .contentTransition(.numericText(value: Double(comment.likeIDs.count)))
             }
             .font(.caption2)
             .foregroundStyle(liked ? .red : .secondary)
@@ -3298,37 +4705,22 @@ private struct ReplyLikeButton: View {
         }
         .buttonStyle(.plain)
         .disabled(updating || auth.user == nil)
+        .animation(reduceMotion ? nil : BlurbMotion.quick, value: liked)
+        .animation(reduceMotion ? nil : BlurbMotion.quick, value: comment.likeIDs.count)
         .accessibilityLabel(liked ? "Unlike reply" : "Like reply")
         .accessibilityValue("\(comment.likeIDs.count) likes")
     }
 }
 
 
-/// Animate only the glyph so the compact badge and text never shift layout.
 private struct AnimatedBadgeIcon: View {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.scenePhase) private var scenePhase
-    @State private var visible = true
     let systemName: String
     var enabled = true
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 15.0,
-                                paused: !enabled || reduceMotion || !visible || scenePhase != .active)) { context in
-            let moving = enabled && !reduceMotion && visible && scenePhase == .active
-            let time = moving ? context.date.timeIntervalSinceReferenceDate : 0
-            let flame = systemName.contains("flame")
-            let wave = moving ? sin(time * (flame ? 4.5 : 2.0)) : 0
-            Image(systemName: systemName)
-                .scaleEffect(x: 1 + wave * (flame ? 0.035 : 0.025),
-                             y: 1 + wave * (flame ? 0.07 : 0.025), anchor: .bottom)
-                .rotationEffect(.degrees(wave * (flame ? 2 : 1)))
-                .offset(y: flame ? -abs(wave) * 0.6 : 0)
-        }
-        .onAppear { visible = true }
-        .onDisappear { visible = false }
-        .onScrollVisibilityChange(threshold: 0.01) { visible = $0 }
-        .accessibilityHidden(true)
+        Image(systemName: systemName)
+            .opacity(enabled ? 1 : 0.42)
+            .accessibilityHidden(true)
     }
 }
 

@@ -86,6 +86,31 @@ service cloud.firestore {
         )
       );
       allow delete: if signedIn() && request.auth.uid == resource.data.ownerID;
+
+      match /newsletterQuestions/{questionID} {
+        allow read: if isGroupMember(groupID);
+        allow create: if isGroupMember(groupID)
+          && request.resource.data.keys().hasOnly([
+            'groupID', 'monthKey', 'promptID', 'question',
+            'authorID', 'authorName', 'createdAt'
+          ])
+          && request.resource.data.groupID == groupID
+          && request.resource.data.authorID == request.auth.uid
+          && request.resource.data.authorName is string
+          && request.resource.data.authorName.size() > 0
+          && request.resource.data.authorName.size() <= 100
+          && request.resource.data.monthKey is string
+          && request.resource.data.monthKey.size() == 7
+          && request.resource.data.promptID is string
+          && request.resource.data.promptID.matches('newsletter-custom-.*')
+          && request.resource.data.question is string
+          && request.resource.data.question.size() > 0
+          && request.resource.data.question.size() <= 180
+          && request.resource.data.createdAt == request.time;
+        // Questions are immutable so answers already written for a prompt can
+        // never silently change or become detached from their newsletter.
+        allow update, delete: if false;
+      }
     }
 
     match /groupInvites/{inviteCode} {

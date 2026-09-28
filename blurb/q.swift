@@ -68,15 +68,7 @@ struct blurbApp: App {
     }
 
     private var authenticatedApp: some View {
-            Group {
-                if auth.isLoading {
-                    ProgressView()
-                } else if auth.user == nil {
-                    WelcomeView()
-                } else {
-                    SignedInRootView()
-                }
-            }
+            AuthenticatedAppContent()
             .environmentObject(auth)
             .environmentObject(blurbStore)
             .fontDesign(.serif)
@@ -92,6 +84,22 @@ struct blurbApp: App {
                     }
                 }
             }
+    }
+}
+
+private struct AuthenticatedAppContent: View {
+    @EnvironmentObject private var auth: AuthManager
+
+    var body: some View {
+        Group {
+            if auth.isLoading {
+                ProgressView()
+            } else if auth.user == nil {
+                WelcomeView()
+            } else {
+                SignedInRootView()
+            }
+        }
     }
 }
 

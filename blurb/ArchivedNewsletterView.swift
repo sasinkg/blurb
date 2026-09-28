@@ -160,7 +160,7 @@ struct ArchivedNewsletterView: View {
                 LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 18) {
                     ForEach(photoEntries) { entry in
                         VStack(alignment: .leading, spacing: 8) {
-                            AsyncImage(url: URL(string: entry.imageURL ?? "")) { image in
+                            BlurbAsyncImage(url: URL(string: entry.imageURL ?? "")) { image in
                                 image.resizable().scaledToFill()
                             } placeholder: {
                                 Rectangle().fill(Color.black.opacity(0.08))
