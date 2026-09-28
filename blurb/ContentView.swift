@@ -1857,6 +1857,7 @@ private struct GroupFeedView: View {
     @AppStorage("birthdayQuestionsEnabled") private var birthdayQuestionsEnabled = false
     @AppStorage("birthdayQuestion") private var birthdayQuestion = ""
     @AppStorage("birthdayTimestamp") private var birthdayTimestamp = Date.now.timeIntervalSince1970
+    @AppStorage("compactFeedEnabled") private var compactFeedEnabled = false
     let group: BlurbGroup
 
     var body: some View {
@@ -2087,6 +2088,7 @@ private struct GroupFeedView: View {
                     PostCard(
                         post: post,
                         currentUserID: auth.user?.uid,
+                        compact: compactFeedEnabled,
                         toggleLike: { Task { await blurbStore.toggleLike(post) } },
                         editAnswer: !post.isSample && post.authorID == auth.user?.uid ? { postToEdit = post } : nil,
                         deleteAnswer: !post.isSample && post.authorID == auth.user?.uid ? { postToDelete = post } : nil,
@@ -2149,6 +2151,7 @@ struct PostCard: View {
     @EnvironmentObject private var blurbStore: BlurbStore
     let post: BlurbPost
     let currentUserID: String?
+    let compact: Bool
     let toggleLike: () -> Void
     let editAnswer: (() -> Void)?
     let deleteAnswer: (() -> Void)?
@@ -2171,6 +2174,50 @@ struct PostCard: View {
     }
 
     var body: some View {
+        Group {
+            if compact {
+                compactCard
+            } else {
+                regularCard
+            }
+        }
+        .onAppear { blurbStore.listenForComments(on: post) }
+        .onDisappear { blurbStore.stopListeningForComments(on: post.id) }
+        .sheet(isPresented: $showingPostEditor) {
+            PostAnswerEditor(post: post)
+        }
+        .confirmationDialog("Why are you reporting this answer?", isPresented: $showingReportReasons, titleVisibility: .visible) {
+            ForEach(moderationReportReasons, id: \.self) { reason in
+                Button(reason) { reportPost(reason: reason) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Your report is private and will be reviewed.")
+        }
+        .confirmationDialog("Block \(post.authorName)?", isPresented: $showingBlockConfirmation, titleVisibility: .visible) {
+            Button("Block user", role: .destructive) {
+                Task {
+                    if await blurbStore.blockUser(id: post.authorID, displayName: post.authorName) {
+                        moderationNotice = "\(post.authorName) is blocked. Their answers and replies are now hidden."
+                    }
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Their answers and replies will be hidden. You can unblock them in Settings.")
+        }
+        .alert("Moderation", isPresented: Binding(
+            get: { moderationNotice != nil },
+            set: { if !$0 { moderationNotice = nil } }
+        )) {
+            Button("OK", role: .cancel) { moderationNotice = nil }
+        } message: {
+            Text(moderationNotice ?? "")
+        }
+        .modifier(MemberProfileLinks(groupID: post.groupID))
+    }
+
+    private var regularCard: some View {
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 6) {
                 postHeader
@@ -2216,40 +2263,79 @@ struct PostCard: View {
 
             if !previewComments.isEmpty { previewReplies }
         }
-        .onAppear { blurbStore.listenForComments(on: post) }
-        .onDisappear { blurbStore.stopListeningForComments(on: post.id) }
-        .sheet(isPresented: $showingPostEditor) {
-            PostAnswerEditor(post: post)
-        }
-        .confirmationDialog("Why are you reporting this answer?", isPresented: $showingReportReasons, titleVisibility: .visible) {
-            ForEach(moderationReportReasons, id: \.self) { reason in
-                Button(reason) { reportPost(reason: reason) }
+    }
+
+    private var compactCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 7) {
+                Text(memberNameText(post.authorName, userID: post.isSample ? nil : post.authorID))
+                    .font(.subheadline.weight(.bold))
+                    .lineLimit(1)
+
+                postMetadata
+
+                Spacer(minLength: 4)
+                postMenu
             }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("Your report is private and will be reviewed.")
-        }
-        .confirmationDialog("Block \(post.authorName)?", isPresented: $showingBlockConfirmation, titleVisibility: .visible) {
-            Button("Block user", role: .destructive) {
-                Task {
-                    if await blurbStore.blockUser(id: post.authorID, displayName: post.authorName) {
-                        moderationNotice = "\(post.authorName) is blocked. Their answers and replies are now hidden."
-                    }
+
+            if post.isSample {
+                Text("SAMPLE")
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(.secondary)
+            }
+
+            Text(mentionText(post.answer))
+                .font(.body)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            if let imageURL = post.imageURL {
+                BlurbAsyncImage(url: URL(string: imageURL)) { image in
+                    image
+                        .resizable()
+                        .scaledToFill()
+                } placeholder: {
+                    ProgressView()
+                        .frame(maxWidth: .infinity, minHeight: 120)
                 }
+                .frame(maxWidth: .infinity, minHeight: 120, maxHeight: 160)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("Their answers and replies will be hidden. You can unblock them in Settings.")
+
+            compactPostReactions
         }
-        .alert("Moderation", isPresented: Binding(
-            get: { moderationNotice != nil },
-            set: { if !$0 { moderationNotice = nil } }
-        )) {
-            Button("OK", role: .cancel) { moderationNotice = nil }
-        } message: {
-            Text(moderationNotice ?? "")
+        .padding(.horizontal, 4)
+        .padding(.vertical, 9)
+        .overlay(alignment: .bottom) {
+            Divider()
+                .overlay(Color.primary.opacity(0.18))
         }
-        .modifier(MemberProfileLinks(groupID: post.groupID))
+    }
+
+    private var compactPostReactions: some View {
+        HStack(spacing: 20) {
+            Button(action: toggleLike) {
+                Label("\(post.likeCount)", systemImage: post.likeIDs.contains(currentUserID ?? "") ? "heart.fill" : "heart")
+                    .foregroundStyle(post.likeIDs.contains(currentUserID ?? "") ? .red : .secondary)
+                    .contentTransition(.numericText(value: Double(post.likeCount)))
+            }
+            .accessibilityLabel(post.likeIDs.contains(currentUserID ?? "") ? "Unlike answer" : "Like answer")
+            .accessibilityValue("\(post.likeCount) likes")
+
+            Button(action: showComments) {
+                Label("\(post.commentCount)", systemImage: "bubble.right")
+                    .foregroundStyle(replyAccent)
+                    .contentTransition(.numericText(value: Double(post.commentCount)))
+            }
+            .accessibilityLabel("Open replies")
+            .accessibilityValue("\(post.commentCount) replies")
+
+            Spacer(minLength: 0)
+        }
+        .font(.caption)
+        .buttonStyle(.plain)
+        .frame(minHeight: 30)
+        .animation(reduceMotion ? nil : BlurbMotion.quick, value: post.likeCount)
+        .animation(reduceMotion ? nil : BlurbMotion.quick, value: post.commentCount)
     }
 
     private var postHeader: some View {
@@ -2302,7 +2388,7 @@ struct PostCard: View {
             } label: {
                 Image(systemName: "ellipsis")
                     .foregroundStyle(.secondary)
-                    .frame(width: 44, height: 44)
+                    .frame(width: compact ? 32 : 44, height: compact ? 32 : 44)
                     .contentShape(Rectangle())
             }
         } else {
@@ -3765,6 +3851,7 @@ struct SettingsView: View {
     @AppStorage("weeklyTriviaEnabled") private var weeklyTriviaEnabled = true
     @AppStorage("monthlyReportEnabled") private var monthlyReportEnabled = true
     @AppStorage("appAppearance") private var appAppearance = AppAppearance.system.rawValue
+    @AppStorage("compactFeedEnabled") private var compactFeedEnabled = false
     @State private var groupToRename: BlurbGroup?
     @State private var showingCreateGroup = false
     @State private var showingJoinGroup = false
@@ -3794,6 +3881,13 @@ struct SettingsView: View {
                                 }
                             }
                             .pickerStyle(.segmented)
+
+                            Divider()
+
+                            Toggle("Compact group feed", isOn: $compactFeedEnabled)
+                            Text("Show answers as simple, tweet-style rows with likes and comments.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
 
                         Button { showingQuestionRules = true } label: {
