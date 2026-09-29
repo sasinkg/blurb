@@ -171,6 +171,11 @@ struct ArchivedNewsletterView: View {
                             .overlay { Rectangle().stroke(.black, lineWidth: 1.5) }
                             Text(entry.prompt)
                                 .font(.system(.caption, design: .serif).bold())
+                            if !entry.answer.isEmpty {
+                                Text(entry.answer)
+                                    .font(.system(.caption2, design: .serif))
+                                    .lineLimit(3)
+                            }
                             Text(entry.authorName.uppercased())
                                 .font(.system(size: 8, weight: .black))
                                 .tracking(0.7)

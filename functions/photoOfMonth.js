@@ -15,11 +15,18 @@ function validateSelectionInput(data) {
   const groupID = typeof data?.groupID === "string" ? data.groupID.trim() : "";
   const postID = typeof data?.postID === "string" ? data.postID.trim() : "";
   const storagePath = typeof data?.storagePath === "string" ? data.storagePath.trim() : "";
+  const caption = validateCaption(data?.caption);
   if (!groupID) throw new Error("A group is required.");
   if (Boolean(postID) === Boolean(storagePath)) {
     throw new Error("Choose a photo post or upload a private photo.");
   }
-  return {groupID, postID, storagePath};
+  return {groupID, postID, storagePath, caption};
+}
+
+function validateCaption(value) {
+  const caption = typeof value === "string" ? value.trim() : "";
+  if (caption.length > 180) throw new Error("Keep the photo caption under 180 characters.");
+  return caption;
 }
 
 function validPrivatePhotoPath(path, groupID, userID, monthKey) {
@@ -34,7 +41,7 @@ function selectionDocumentID(groupID, monthKey) {
   return `${groupID}_${monthKey}`;
 }
 
-function buildSelection({groupID, postID, post, userID, monthKey}) {
+function buildSelection({groupID, postID, post, userID, monthKey, caption = ""}) {
   return {
     groupID,
     monthKey,
@@ -42,6 +49,7 @@ function buildSelection({groupID, postID, post, userID, monthKey}) {
     postID,
     imageURL: post.imageURL,
     authorName: post.authorName ?? "Blurb friend",
+    caption: validateCaption(caption),
     postCreatedAt: post.createdAt,
   };
 }
@@ -50,6 +58,7 @@ module.exports = {
   buildSelection,
   photoMonthKey,
   selectionDocumentID,
+  validateCaption,
   validateSelectionInput,
   validPrivatePhotoPath,
 };

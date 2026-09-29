@@ -11,7 +11,9 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate, Mes
     private let center = UNUserNotificationCenter.current()
     private let dailyReminderIdentifier = "daily-blurb-reminder"
     private let answeredReminderKeyPrefix = "daily-blurb-answered-reminder"
+    private let pushTokenRepairKeyPrefix = "push-token-apns-repair-v1"
     private let reminderTimes = [(slot: "morning", hour: 10), (slot: "evening", hour: 19)]
+    private var isRefreshingMessagingToken = false
 
     private override init() {
         super.init()
@@ -94,13 +96,11 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate, Mes
             throw NotificationError.unavailable
         }
 
+        await setReplyNotificationPreference(true)
         await MainActor.run {
             UIApplication.shared.registerForRemoteNotifications()
         }
-        if let token = try? await Messaging.messaging().token() {
-            await save(token: token)
-        }
-        await setReplyNotificationPreference(true)
+        await refreshMessagingTokenIfReady()
     }
 
     func restoreReplyNotificationsIfAuthorized() async -> Bool {
@@ -131,17 +131,66 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate, Mes
     }
 
     func messaging(_ messaging: Messaging, didReceiveRegistrationToken fcmToken: String?) {
-        guard let fcmToken else { return }
-        Task { await save(token: fcmToken) }
+        guard messaging.apnsToken != nil, let fcmToken else { return }
+        Task { _ = await save(token: fcmToken) }
     }
 
-    private func save(token: String) async {
+    func didRegisterForRemoteNotifications(with deviceToken: Data) {
+        Messaging.messaging().apnsToken = deviceToken
+        Task { await refreshMessagingTokenIfReady() }
+    }
+
+    func restoreRemoteRegistrationIfNeeded() async {
+        guard UserDefaults.standard.bool(forKey: "replyNotificationsEnabled")
+                || UserDefaults.standard.bool(forKey: "dailyReminderEnabled") else { return }
+        let settings = await center.notificationSettings()
+        guard [.authorized, .provisional, .ephemeral].contains(settings.authorizationStatus) else { return }
+        await MainActor.run {
+            UIApplication.shared.registerForRemoteNotifications()
+        }
+        await refreshMessagingTokenIfReady()
+    }
+
+    @MainActor
+    private func refreshMessagingTokenIfReady() async {
+        // Firebase cannot associate an FCM token with this iPhone until APNs has
+        // completed registration. The app delegate calls this again when that happens.
+        guard Messaging.messaging().apnsToken != nil,
+              let userID = Auth.auth().currentUser?.uid,
+              !isRefreshingMessagingToken else { return }
+        isRefreshingMessagingToken = true
+        defer { isRefreshingMessagingToken = false }
+
+        let repairKey = "\(pushTokenRepairKeyPrefix)-\(userID)"
+        let needsFreshToken = !UserDefaults.standard.bool(forKey: repairKey)
+        if needsFreshToken {
+            if let previousToken = try? await Messaging.messaging().token() {
+                try? await Firestore.firestore().collection("users").document(userID).updateData([
+                    "fcmTokens": FieldValue.arrayRemove([previousToken])
+                ])
+            }
+            try? await Messaging.messaging().deleteToken()
+        }
+
+        guard let token = try? await Messaging.messaging().token() else { return }
+        if await save(token: token), needsFreshToken {
+            UserDefaults.standard.set(true, forKey: repairKey)
+        }
+    }
+
+    @discardableResult
+    private func save(token: String) async -> Bool {
         guard (UserDefaults.standard.bool(forKey: "replyNotificationsEnabled") ||
                UserDefaults.standard.bool(forKey: "dailyReminderEnabled")),
-              let userID = Auth.auth().currentUser?.uid else { return }
-        try? await Firestore.firestore().collection("users").document(userID).setData([
-            "fcmTokens": FieldValue.arrayUnion([token])
-        ], merge: true)
+              let userID = Auth.auth().currentUser?.uid else { return false }
+        do {
+            try await Firestore.firestore().collection("users").document(userID).setData([
+                "fcmTokens": FieldValue.arrayUnion([token])
+            ], merge: true)
+            return true
+        } catch {
+            return false
+        }
     }
 
     private func scheduleDailyReminder() async throws {
@@ -213,9 +262,7 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate, Mes
         await MainActor.run {
             UIApplication.shared.registerForRemoteNotifications()
         }
-        if let token = try? await Messaging.messaging().token() {
-            await save(token: token)
-        }
+        await refreshMessagingTokenIfReady()
     }
 
     private func setDailyReminderPreference(_ enabled: Bool) async {
@@ -249,7 +296,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         _ application: UIApplication,
         didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data
     ) {
-        Messaging.messaging().apnsToken = deviceToken
+        NotificationManager.shared.didRegisterForRemoteNotifications(with: deviceToken)
     }
 }
 

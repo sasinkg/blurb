@@ -8,6 +8,7 @@ struct PhotoOfMonthSelection: Identifiable, Hashable {
     let postID: String
     let imageURL: String
     let authorName: String
+    let caption: String
     let postCreatedAt: Date
     let createdAt: Date
     let updatedAt: Date

@@ -142,6 +142,7 @@ struct ContentView: View {
             if let userID = auth.user?.uid {
                 if await auth.refreshSession() {
                     blurbStore.start(for: userID)
+                    await NotificationManager.shared.restoreRemoteRegistrationIfNeeded()
                 }
             }
         }
@@ -502,7 +503,7 @@ private struct NewsletterUpdateAnnouncementView: View {
                     updateRule(
                         icon: "photo.badge.plus",
                         title: "Build the finished edition",
-                        text: "Official and group-added answers join each member’s Photo of the Month and the group’s monthly highlights."
+                        text: "Official and group-added answers join each member’s captioned Photo and Song of the Month, plus the group’s monthly highlights."
                     )
 
                     Text("Want to see these rules again? Open **Settings → How Questions Work**.")
@@ -3127,7 +3128,7 @@ private struct CommentRow: View {
                 HStack(spacing: 8) {
                     Text(memberNameText(comment.authorName, userID: comment.authorID))
                         .font(.system(.subheadline, design: .serif).bold())
-                    Text(comment.createdAt, style: .relative)
+                    Text(commentTimestamp)
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                         .lineLimit(1)
@@ -3197,6 +3198,15 @@ private struct CommentRow: View {
             Text(moderationNotice ?? "")
         }
         .modifier(OwnReplyActions(comment: comment, post: post))
+    }
+
+    private var commentTimestamp: String {
+        let elapsed = max(0, Date.now.timeIntervalSince(comment.createdAt))
+        if elapsed < 60 { return "just now" }
+        if elapsed < 3_600 { return "\(Int(elapsed / 60))m ago" }
+        if elapsed < 86_400 { return "\(Int(elapsed / 3_600))h ago" }
+        if elapsed < 604_800 { return "\(Int(elapsed / 86_400))d ago" }
+        return comment.createdAt.formatted(date: .abbreviated, time: .omitted)
     }
 }
 
@@ -3795,12 +3805,17 @@ private struct QuestionRulesView: View {
                         rule(
                             icon: "photo.badge.plus",
                             title: "Photo of the Month",
-                            text: "Choose one photo privately for each group. You can change it during the month; it is revealed when the finished newsletter is published."
+                            text: "Choose one photo privately for each group and add an optional caption. You can change either during the month; they are revealed when the finished newsletter is published."
+                        )
+                        rule(
+                            icon: "music.note",
+                            title: "Song of the Month",
+                            text: "Add a song title and optional artist for each group. Your pick stays private and editable until the finished newsletter is published."
                         )
                         rule(
                             icon: "sparkles.rectangle.stack.fill",
                             title: "What goes into the newsletter",
-                            text: "The finished edition includes answers to the four Friday questions and any group-added questions, each member’s Photo of the Month, and monthly highlights such as participation, points, reactions, and cities."
+                            text: "The finished edition includes official and group-added answers, each member’s Photo and Song of the Month, and highlights such as participation, points, reactions, and cities."
                         )
 
                         Text("Friday notifications use your Daily Blurb reminder setting. Notifications must also be allowed in iPhone Settings.")

@@ -180,6 +180,7 @@ final class BlurbStore: ObservableObject {
     @Published private(set) var newsletterEditions: [NewsletterEdition] = []
     @Published private(set) var photoOfMonthSelections: [String: PhotoOfMonthSelection] = [:]
     @Published private(set) var photoOfMonthSelectionsLoaded = false
+    @Published private(set) var songOfMonthSelections: [String: SongOfMonthSelection] = [:]
     @Published var selectedGroupID: String?
     @Published var errorMessage: String?
     @Published private(set) var listenerErrorMessage: String?
@@ -191,6 +192,7 @@ final class BlurbStore: ObservableObject {
     private var blockedUsersListener: ListenerRegistration?
     private var newsletterListener: ListenerRegistration?
     private var photoOfMonthListener: ListenerRegistration?
+    private var songOfMonthListener: ListenerRegistration?
     private var answerCountListeners: [String: ListenerRegistration] = [:]
     private var commentListeners: [String: ListenerRegistration] = [:]
     private var unfilteredPosts: [BlurbPost] = []
@@ -258,10 +260,23 @@ final class BlurbStore: ObservableObject {
         photoOfMonthSelections[Self.photoSelectionID(groupID: groupID)]
     }
 
-    func selectPhotoOfMonth(_ post: BlurbPost) async -> Bool {
+    func songOfMonthSelection(in groupID: String) -> SongOfMonthSelection? {
+        songOfMonthSelections[Self.photoSelectionID(groupID: groupID)]
+    }
+
+    func selectPhotoOfMonth(_ post: BlurbPost, caption: String = "") async -> Bool {
+        let trimmedCaption = caption.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmedCaption.count <= 180 else {
+            errorMessage = "Keep the photo caption under 180 characters."
+            return false
+        }
+        guard ContentModeration.allows(trimmedCaption) else {
+            errorMessage = ContentModeration.rejectionMessage
+            return false
+        }
         do {
             _ = try await Functions.functions().httpsCallable("setPhotoOfMonthSelection")
-                .call(["groupID": post.groupID, "postID": post.id])
+                .call(["groupID": post.groupID, "postID": post.id, "caption": trimmedCaption])
             return true
         } catch {
             errorMessage = error.localizedDescription
@@ -269,9 +284,18 @@ final class BlurbStore: ObservableObject {
         }
     }
 
-    func uploadPrivatePhotoOfMonth(_ imageData: Data, in groupID: String) async -> Bool {
+    func uploadPrivatePhotoOfMonth(_ imageData: Data, in groupID: String, caption: String = "") async -> Bool {
         guard let userID = currentUserID else {
             errorMessage = "Sign in to choose a photo."
+            return false
+        }
+        let trimmedCaption = caption.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmedCaption.count <= 180 else {
+            errorMessage = "Keep the photo caption under 180 characters."
+            return false
+        }
+        guard ContentModeration.allows(trimmedCaption) else {
+            errorMessage = ContentModeration.rejectionMessage
             return false
         }
         let monthKey = Self.photoMonthKey()
@@ -282,10 +306,66 @@ final class BlurbStore: ObservableObject {
             metadata.contentType = "image/jpeg"
             _ = try await reference.putDataAsync(imageData, metadata: metadata)
             _ = try await Functions.functions().httpsCallable("setPhotoOfMonthSelection")
-                .call(["groupID": groupID, "storagePath": path])
+                .call(["groupID": groupID, "storagePath": path, "caption": trimmedCaption])
             return true
         } catch {
             try? await reference.delete()
+            errorMessage = error.localizedDescription
+            return false
+        }
+    }
+
+    func updatePhotoOfMonthCaption(_ caption: String, in groupID: String) async -> Bool {
+        let trimmed = caption.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count <= 180 else {
+            errorMessage = "Keep the photo caption under 180 characters."
+            return false
+        }
+        guard ContentModeration.allows(trimmed) else {
+            errorMessage = ContentModeration.rejectionMessage
+            return false
+        }
+        do {
+            _ = try await Functions.functions().httpsCallable("updatePhotoOfMonthCaption")
+                .call(["groupID": groupID, "caption": trimmed])
+            return true
+        } catch {
+            errorMessage = error.localizedDescription
+            return false
+        }
+    }
+
+    func saveSongOfMonth(title: String, artist: String, in groupID: String) async -> Bool {
+        let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedArtist = artist.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedTitle.isEmpty else {
+            errorMessage = "Add a song title."
+            return false
+        }
+        guard trimmedTitle.count <= 100, trimmedArtist.count <= 100 else {
+            errorMessage = "Keep the song title and artist under 100 characters each."
+            return false
+        }
+        guard ContentModeration.allows(trimmedTitle), ContentModeration.allows(trimmedArtist) else {
+            errorMessage = ContentModeration.rejectionMessage
+            return false
+        }
+        do {
+            _ = try await Functions.functions().httpsCallable("setSongOfMonthSelection")
+                .call(["groupID": groupID, "title": trimmedTitle, "artist": trimmedArtist])
+            return true
+        } catch {
+            errorMessage = error.localizedDescription
+            return false
+        }
+    }
+
+    func removeSongOfMonth(in groupID: String) async -> Bool {
+        do {
+            _ = try await Functions.functions().httpsCallable("setSongOfMonthSelection")
+                .call(["groupID": groupID, "remove": true])
+            return true
+        } catch {
             errorMessage = error.localizedDescription
             return false
         }
@@ -527,6 +607,16 @@ final class BlurbStore: ObservableObject {
                     self?.photoOfMonthSelectionsLoaded = true
                 }
             }
+
+        songOfMonthListener = database.collection("users").document(userID)
+            .collection("songOfMonthSelections")
+            .addSnapshotListener { [weak self] snapshot, error in
+                guard error == nil else { return }
+                let selections = snapshot?.documents.compactMap(Self.makeSongOfMonthSelection) ?? []
+                Task { @MainActor in
+                    self?.songOfMonthSelections = Dictionary(uniqueKeysWithValues: selections.map { ($0.id, $0) })
+                }
+            }
     }
 
     func invalidateListeners() {
@@ -538,6 +628,7 @@ final class BlurbStore: ObservableObject {
         blockedUsersListener?.remove(); blockedUsersListener = nil
         newsletterListener?.remove(); newsletterListener = nil
         photoOfMonthListener?.remove(); photoOfMonthListener = nil
+        songOfMonthListener?.remove(); songOfMonthListener = nil
         answerCountListeners.values.forEach { $0.remove() }
         answerCountListeners = [:]
         commentListeners.values.forEach { $0.remove() }
@@ -553,7 +644,7 @@ final class BlurbStore: ObservableObject {
         profile = BlurbProfile()
         profileLoaded = false
         needsProfileSetup = false
-        groups = []; groupsLoaded = false; posts = []; unfilteredPosts = []; answerCountsByGroup = [:]; answeringMemberIDsByGroup = [:]; myAnswerStatusByGroup = [:]; commentsByPostID = [:]; unfilteredCommentsByPostID = [:]; blockedUsers = []; newsletterEditions = []; photoOfMonthSelections = [:]; photoOfMonthSelectionsLoaded = false; selectedGroupID = nil
+        groups = []; groupsLoaded = false; posts = []; unfilteredPosts = []; answerCountsByGroup = [:]; answeringMemberIDsByGroup = [:]; myAnswerStatusByGroup = [:]; commentsByPostID = [:]; unfilteredCommentsByPostID = [:]; blockedUsers = []; newsletterEditions = []; photoOfMonthSelections = [:]; photoOfMonthSelectionsLoaded = false; songOfMonthSelections = [:]; selectedGroupID = nil
         errorMessage = nil
         listenerErrors = [:]
         listenerErrorMessage = nil
@@ -699,7 +790,13 @@ final class BlurbStore: ObservableObject {
                 .call(["groupID": groupID, "memberID": memberID])
             return true
         } catch {
-            errorMessage = error.localizedDescription
+            let functionsError = error as NSError
+            if functionsError.domain == FunctionsErrorDomain,
+               functionsError.code == FunctionsErrorCode.unavailable.rawValue {
+                errorMessage = "Their notification connection needs to refresh. Ask them to open the latest version of Blurb once, then try again."
+            } else {
+                errorMessage = error.localizedDescription
+            }
             return false
         }
     }
@@ -1413,6 +1510,11 @@ final class BlurbStore: ObservableObject {
             for selection in photoSelections.documents {
                 try await selection.reference.delete()
             }
+            let songSelections = try await database.collection("users").document(userID)
+                .collection("songOfMonthSelections").getDocuments()
+            for selection in songSelections.documents {
+                try await selection.reference.delete()
+            }
             try? await Storage.storage().reference().child("profile-images/\(userID).jpg").delete()
             try await database.collection("users").document(userID).delete()
             return true
@@ -1605,7 +1707,27 @@ final class BlurbStore: ObservableObject {
         return PhotoOfMonthSelection(
             id: document.documentID, groupID: groupID, monthKey: monthKey, userID: userID,
             postID: postID, imageURL: imageURL, authorName: data["authorName"] as? String ?? "Blurb friend",
+            caption: data["caption"] as? String ?? "",
             postCreatedAt: (data["postCreatedAt"] as? Timestamp)?.dateValue() ?? .now,
+            createdAt: (data["createdAt"] as? Timestamp)?.dateValue() ?? .now,
+            updatedAt: (data["updatedAt"] as? Timestamp)?.dateValue() ?? .now
+        )
+    }
+
+    private static func makeSongOfMonthSelection(_ document: QueryDocumentSnapshot) -> SongOfMonthSelection? {
+        let data = document.data()
+        guard let groupID = data["groupID"] as? String,
+              let monthKey = data["monthKey"] as? String,
+              let userID = data["userID"] as? String,
+              let title = data["title"] as? String else { return nil }
+        return SongOfMonthSelection(
+            id: document.documentID,
+            groupID: groupID,
+            monthKey: monthKey,
+            userID: userID,
+            title: title,
+            artist: data["artist"] as? String ?? "",
+            authorName: data["authorName"] as? String ?? "Blurb friend",
             createdAt: (data["createdAt"] as? Timestamp)?.dateValue() ?? .now,
             updatedAt: (data["updatedAt"] as? Timestamp)?.dateValue() ?? .now
         )

@@ -125,6 +125,19 @@ struct GroupNewsletterHomeView: View {
                     }
                     .buttonStyle(.plain)
 
+                    NavigationLink {
+                        SongOfMonthPickerView(group: group)
+                    } label: {
+                        newsletterCard(
+                            title: "Song of the Month",
+                            subtitle: blurbStore.songOfMonthSelection(in: group.id)?.displayText
+                                ?? "Add the song that defined your month",
+                            icon: blurbStore.songOfMonthSelection(in: group.id) == nil
+                                ? "music.note.list" : "checkmark.circle.fill"
+                        )
+                    }
+                    .buttonStyle(.plain)
+
                     newsletterCard(
                         title: currentEdition.monthLabel,
                         subtitle: "Locked until the finished edition is generated",
@@ -199,6 +212,9 @@ struct PhotoOfMonthPickerView: View {
     @State private var savingPostID: String?
     @State private var photoItem: PhotosPickerItem?
     @State private var isUploading = false
+    @State private var caption = ""
+    @State private var isSavingCaption = false
+    @State private var captionSaved = false
 
     private var posts: [BlurbPost] { blurbStore.photoPostsForCurrentMonth(in: group.id) }
     private var selection: PhotoOfMonthSelection? { blurbStore.photoOfMonthSelection(in: group.id) }
@@ -221,6 +237,37 @@ struct PhotoOfMonthPickerView: View {
                             Text("Only you can see it until the newsletter is published.")
                                 .font(.caption).foregroundStyle(.secondary)
                         }
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Photo caption")
+                        .font(.headline)
+                    TextField("What made this moment memorable? (optional)", text: $caption, axis: .vertical)
+                        .lineLimit(2...4)
+                        .padding(12)
+                        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 10))
+                    HStack {
+                        Text("\(caption.count)/180")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(caption.count > 180 ? .red : .secondary)
+                        Spacer()
+                        if selection != nil {
+                            Button(captionSaved ? "Saved" : "Save caption") {
+                                saveCaption()
+                            }
+                            .font(.subheadline.bold())
+                            .disabled(
+                                isSavingCaption
+                                    || caption.count > 180
+                                    || caption.trimmingCharacters(in: .whitespacesAndNewlines) == selection?.caption
+                            )
+                        }
+                    }
+                    if selection == nil {
+                        Text("Your caption will be saved when you choose a photo.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                 }
 
@@ -250,7 +297,7 @@ struct PhotoOfMonthPickerView: View {
                             Button {
                                 savingPostID = post.id
                                 Task {
-                                    if await blurbStore.selectPhotoOfMonth(post) { dismiss() }
+                                    if await blurbStore.selectPhotoOfMonth(post, caption: caption) { dismiss() }
                                     savingPostID = nil
                                 }
                             } label: {
@@ -280,6 +327,12 @@ struct PhotoOfMonthPickerView: View {
         }
         .navigationTitle("Photo of the Month")
         .navigationBarTitleDisplayMode(.inline)
+        .onAppear {
+            caption = selection?.caption ?? ""
+        }
+        .onChange(of: caption) { _, _ in
+            captionSaved = false
+        }
         .onChange(of: photoItem) { _, item in
             guard let item else { return }
             isUploading = true
@@ -291,11 +344,109 @@ struct PhotoOfMonthPickerView: View {
                         blurbStore.errorMessage = "Could not read that photo. Please choose another."
                         return
                     }
-                    if await blurbStore.uploadPrivatePhotoOfMonth(jpeg, in: group.id) { dismiss() }
+                    if await blurbStore.uploadPrivatePhotoOfMonth(jpeg, in: group.id, caption: caption) { dismiss() }
                 } catch {
                     blurbStore.errorMessage = error.localizedDescription
                 }
             }
+        }
+    }
+
+    private func saveCaption() {
+        guard !isSavingCaption else { return }
+        isSavingCaption = true
+        Task {
+            if await blurbStore.updatePhotoOfMonthCaption(caption, in: group.id) {
+                captionSaved = true
+            }
+            isSavingCaption = false
+        }
+    }
+}
+
+struct SongOfMonthPickerView: View {
+    @EnvironmentObject private var blurbStore: BlurbStore
+    @Environment(\.dismiss) private var dismiss
+    let group: BlurbGroup
+    @State private var title = ""
+    @State private var artist = ""
+    @State private var isSaving = false
+    @State private var showingRemoveConfirmation = false
+
+    private var selection: SongOfMonthSelection? {
+        blurbStore.songOfMonthSelection(in: group.id)
+    }
+
+    var body: some View {
+        Form {
+            Section {
+                Text("Pick the song that defined your month. It stays private until (group.name)’s newsletter is created, and you can change it until month end.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("YOUR PICK") {
+                TextField("Song title", text: $title)
+                    .textInputAutocapitalization(.words)
+                TextField("Artist (optional)", text: $artist)
+                    .textInputAutocapitalization(.words)
+            }
+
+            Section {
+                Button {
+                    saveSong()
+                } label: {
+                    HStack {
+                        Label(selection == nil ? "Save Song of the Month" : "Update Song of the Month", systemImage: "music.note")
+                        Spacer()
+                        if isSaving { ProgressView() }
+                    }
+                }
+                .disabled(
+                    isSaving
+                        || title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        || title.count > 100
+                        || artist.count > 100
+                )
+
+                if selection != nil {
+                    Button("Remove Song of the Month", role: .destructive) {
+                        showingRemoveConfirmation = true
+                    }
+                    .disabled(isSaving)
+                }
+            } footer: {
+                Text("Song choices do not affect points or your daily streak.")
+            }
+        }
+        .navigationTitle("Song of the Month")
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear {
+            title = selection?.title ?? ""
+            artist = selection?.artist ?? ""
+        }
+        .confirmationDialog("Remove your song?", isPresented: $showingRemoveConfirmation, titleVisibility: .visible) {
+            Button("Remove song", role: .destructive) {
+                isSaving = true
+                Task {
+                    if await blurbStore.removeSongOfMonth(in: group.id) { dismiss() }
+                    isSaving = false
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("You can choose another song any time before the newsletter is created.")
+        }
+    }
+
+    private func saveSong() {
+        guard !isSaving else { return }
+        isSaving = true
+        Task {
+            if await blurbStore.saveSongOfMonth(title: title, artist: artist, in: group.id) {
+                dismiss()
+            }
+            isSaving = false
         }
     }
 }

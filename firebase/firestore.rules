@@ -48,6 +48,14 @@ service cloud.firestore {
         allow delete: if signedIn() && request.auth.uid == userID;
       }
 
+      match /songOfMonthSelections/{selectionID} {
+        // Song choices stay private until a trusted monthly recap copies them
+        // into the group's published edition.
+        allow read: if signedIn() && request.auth.uid == userID;
+        allow create, update: if false;
+        allow delete: if signedIn() && request.auth.uid == userID;
+      }
+
       match /blockedUsers/{blockedUserID} {
         // List queries cannot prove a condition on every document ID. The
         // owner may read the whole private subcollection, while writes still

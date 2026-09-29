@@ -4,6 +4,7 @@ const {
   buildSelection,
   photoMonthKey,
   selectionDocumentID,
+  validateCaption,
   validateSelectionInput,
   validPrivatePhotoPath,
 } = require("./photoOfMonth");
@@ -19,11 +20,12 @@ test("selection input trims identifiers and rejects missing values", () => {
     groupID: "group",
     postID: "post",
     storagePath: "",
+    caption: "",
   });
   assert.throws(() => validateSelectionInput({groupID: "group"}), /photo post or upload/i);
   assert.throws(() => validateSelectionInput({postID: "post"}), /group/i);
   assert.deepEqual(validateSelectionInput({groupID: "group", storagePath: " photo.jpg "}), {
-    groupID: "group", postID: "", storagePath: "photo.jpg",
+    groupID: "group", postID: "", storagePath: "photo.jpg", caption: "",
   });
   assert.throws(() => validateSelectionInput({groupID: "group", postID: "post", storagePath: "photo.jpg"}), /photo post or upload/i);
 });
@@ -49,6 +51,7 @@ test("selection snapshots recap-safe photo metadata", () => {
     postID: "post",
     userID: "user",
     post: {imageURL: "https://example.com/photo.jpg", authorName: "Sasin", createdAt},
+    caption: "Best day of the month",
   }), {
     groupID: "friends",
     monthKey: "2026-09",
@@ -56,6 +59,12 @@ test("selection snapshots recap-safe photo metadata", () => {
     postID: "post",
     imageURL: "https://example.com/photo.jpg",
     authorName: "Sasin",
+    caption: "Best day of the month",
     postCreatedAt: createdAt,
   });
+});
+
+test("photo captions are trimmed and length-limited", () => {
+  assert.equal(validateCaption("  Great day  "), "Great day");
+  assert.throws(() => validateCaption("x".repeat(181)), /180/);
 });

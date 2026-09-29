@@ -16,9 +16,11 @@ const {
   buildSelection,
   photoMonthKey,
   selectionDocumentID,
+  validateCaption,
   validateSelectionInput,
   validPrivatePhotoPath,
 } = require("./photoOfMonth");
+const {songDisplayText, validateSongSelectionInput} = require("./songOfMonth");
 
 async function monthlyProgress(database, groupID, memberIDs, date = new Date()) {
   const newsletter = newsletterContext(date);
@@ -217,7 +219,9 @@ exports.setPhotoOfMonthSelection = onCall(async (request) => {
   await database.runTransaction(async (transaction) => {
     const existing = await transaction.get(reference);
     const selection = {
-      ...buildSelection({groupID: input.groupID, postID: input.postID, post, userID, monthKey}),
+      ...buildSelection({
+        groupID: input.groupID, postID: input.postID, post, userID, monthKey, caption: input.caption,
+      }),
       updatedAt: FieldValue.serverTimestamp(),
     };
     if (!existing.exists) selection.createdAt = FieldValue.serverTimestamp();
@@ -225,6 +229,76 @@ exports.setPhotoOfMonthSelection = onCall(async (request) => {
   });
 
   return {monthKey, postID: input.postID};
+});
+
+exports.updatePhotoOfMonthCaption = onCall(async (request) => {
+  if (!request.auth?.uid) throw new HttpsError("unauthenticated", "Sign in to update your caption.");
+  const groupID = typeof request.data?.groupID === "string" ? request.data.groupID.trim() : "";
+  if (!groupID) throw new HttpsError("invalid-argument", "A group is required.");
+  let caption;
+  try {
+    caption = validateCaption(request.data?.caption);
+  } catch (error) {
+    throw new HttpsError("invalid-argument", error.message);
+  }
+
+  const database = getFirestore();
+  const userID = request.auth.uid;
+  const group = (await database.doc(`groups/${groupID}`).get()).data();
+  if (!(group?.memberIDs ?? []).includes(userID)) {
+    throw new HttpsError("permission-denied", "You are not a member of this group.");
+  }
+  const monthKey = photoMonthKey(new Date());
+  const reference = database.doc(
+      `users/${userID}/photoOfMonthSelections/${selectionDocumentID(groupID, monthKey)}`,
+  );
+  if (!(await reference.get()).exists) {
+    throw new HttpsError("failed-precondition", "Choose a Photo of the Month first.");
+  }
+  await reference.update({caption, updatedAt: FieldValue.serverTimestamp()});
+  return {monthKey};
+});
+
+exports.setSongOfMonthSelection = onCall(async (request) => {
+  if (!request.auth?.uid) throw new HttpsError("unauthenticated", "Sign in to choose a song.");
+  let input;
+  try {
+    input = validateSongSelectionInput(request.data);
+  } catch (error) {
+    throw new HttpsError("invalid-argument", error.message);
+  }
+
+  const database = getFirestore();
+  const userID = request.auth.uid;
+  const group = (await database.doc(`groups/${input.groupID}`).get()).data();
+  if (!(group?.memberIDs ?? []).includes(userID)) {
+    throw new HttpsError("permission-denied", "You are not a member of this group.");
+  }
+  const monthKey = photoMonthKey(new Date());
+  const reference = database.doc(
+      `users/${userID}/songOfMonthSelections/${selectionDocumentID(input.groupID, monthKey)}`,
+  );
+  if (input.remove) {
+    await reference.delete();
+    return {monthKey, removed: true};
+  }
+
+  const profile = (await database.doc(`users/${userID}`).get()).data();
+  await database.runTransaction(async (transaction) => {
+    const existing = await transaction.get(reference);
+    const selection = {
+      groupID: input.groupID,
+      monthKey,
+      userID,
+      title: input.title,
+      artist: input.artist,
+      authorName: profile?.displayName ?? "Blurb friend",
+      updatedAt: FieldValue.serverTimestamp(),
+    };
+    if (!existing.exists) selection.createdAt = FieldValue.serverTimestamp();
+    transaction.set(reference, selection, {merge: true});
+  });
+  return {monthKey};
 });
 
 async function notifyGroupActivity({eventID, postID, post, senderID, text, previousText = "", commentID}) {
@@ -473,14 +547,18 @@ exports.generateMonthlyNewsletters = onSchedule(
 
         for (const userID of group.memberIDs ?? []) {
           const selectionID = selectionDocumentID(groupDocument.id, monthKey);
-          const selection = (await database.doc(`users/${userID}/photoOfMonthSelections/${selectionID}`).get()).data();
+          const [photoSnapshot, songSnapshot] = await Promise.all([
+            database.doc(`users/${userID}/photoOfMonthSelections/${selectionID}`).get(),
+            database.doc(`users/${userID}/songOfMonthSelections/${selectionID}`).get(),
+          ]);
+          const selection = photoSnapshot.data();
           if (selection?.imageURL) {
             entries.push({
               postID: `photo-of-month-${userID}-${monthKey}`,
               sourcePostID: selection.postID,
               authorID: userID,
               authorName: selection.authorName ?? "Blurb friend",
-              answer: "",
+              answer: selection.caption ?? "",
               prompt: "Photo of the Month",
               promptID: `photo-of-month-${monthKey}`,
               imageURL: selection.imageURL,
@@ -488,6 +566,22 @@ exports.generateMonthlyNewsletters = onSchedule(
               createdAt: selection.postCreatedAt,
               pointsAwarded: 0,
               isPhotoOfMonth: true,
+            });
+          }
+          const song = songSnapshot.data();
+          if (song?.title) {
+            entries.push({
+              postID: `song-of-month-${userID}-${monthKey}`,
+              authorID: userID,
+              authorName: song.authorName ?? "Blurb friend",
+              answer: songDisplayText(song.title, song.artist ?? ""),
+              prompt: "Song of the Month",
+              promptID: `song-of-month-${monthKey}`,
+              imageURL: null,
+              pollOptions: [],
+              createdAt: song.createdAt ?? Timestamp.now(),
+              pointsAwarded: 0,
+              isSongOfMonth: true,
             });
           }
         }
