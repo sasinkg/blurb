@@ -3,11 +3,22 @@ import UniformTypeIdentifiers
 
 struct MonthlyWrappedView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @EnvironmentObject private var blurbStore: BlurbStore
     let edition: NewsletterEdition
     @State private var page = 0
     @State private var shareCard: WrappedShareImage?
+    @State private var generatedPDF: WrappedPDF?
+    @State private var pdfError: String?
+    @State private var isExportingPDF = false
+    @State private var showingPremium = false
     private let paper = Color(red: 0.96, green: 0.93, blue: 0.82)
-    private let accent = Color(red: 1, green: 0.78, blue: 0.02)
+    private var accent: Color {
+        blurbStore.groups.first(where: { $0.id == edition.groupID })?.themeColor ?? GroupTheme.gold.color
+    }
+
+    private var currentGroup: BlurbGroup? {
+        blurbStore.groups.first(where: { $0.id == edition.groupID })
+    }
 
     private var slides: [WrappedSlide] {
         var result: [WrappedSlide] = [.intro]
@@ -77,6 +88,31 @@ struct MonthlyWrappedView: View {
                 .accessibilityLabel("Share Monthly Wrapped")
             }
         }
+        .sheet(item: $generatedPDF) { generatedPDF in
+            WrappedPDFShareSheet(url: generatedPDF.url)
+        }
+        .sheet(isPresented: $showingPremium) {
+            if let currentGroup {
+                NavigationStack {
+                    GroupPremiumHubView(group: currentGroup)
+                        .toolbar {
+                            ToolbarItem(placement: .cancellationAction) {
+                                Button("Done") { showingPremium = false }
+                            }
+                        }
+                }
+                .presentationDetents([.large])
+                .presentationBackground(.ultraThinMaterial)
+            }
+        }
+        .alert("Couldn’t create PDF", isPresented: Binding(
+            get: { pdfError != nil },
+            set: { if !$0 { pdfError = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(pdfError ?? "Please try again.")
+        }
         .task { renderShareCard() }
         .accessibilityAction(named: "Previous") { move(-1) }
         .accessibilityAction(named: "Next") { move(1) }
@@ -93,7 +129,7 @@ struct MonthlyWrappedView: View {
     }
 
     @MainActor private func renderShareCard() {
-        let card = WrappedShareCard(edition: edition).frame(width: 1080, height: 1350)
+        let card = WrappedShareCard(edition: edition, accent: accent).frame(width: 1080, height: 1350)
         let renderer = ImageRenderer(content: card)
         renderer.scale = 1
         if let image = renderer.uiImage { shareCard = WrappedShareImage(image: image) }
@@ -151,19 +187,28 @@ struct MonthlyWrappedView: View {
                 sectionLabel("PHOTO DESK")
                 Text(title).font(.system(size: 28, weight: .black, design: .serif)).multilineTextAlignment(.center)
                 ScrollView {
-                    LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 14) {
-                        ForEach(entries) { entry in
-                            VStack(alignment: .leading, spacing: 6) {
-                                if entry.imageURL?.hasPrefix("demo://") == true {
-                                    DemoWrappedPhoto(url: entry.imageURL ?? "")
-                                        .aspectRatio(4.0 / 5.0, contentMode: .fill).clipped()
-                                        .overlay { Rectangle().stroke(.black, lineWidth: 2) }
-                                } else {
-                                    BlurbAsyncImage(url: URL(string: entry.imageURL ?? "")) { $0.resizable().scaledToFill() } placeholder: { Rectangle().fill(.quaternary) }
-                                        .aspectRatio(4.0 / 5.0, contentMode: .fit).clipped().overlay { Rectangle().stroke(.black, lineWidth: 2) }
+                    LazyVStack(spacing: 14) {
+                        ForEach(Array(stride(from: 0, to: entries.count, by: 2)), id: \.self) { rowStart in
+                            HStack(alignment: .top, spacing: 14) {
+                                ForEach(rowStart..<min(rowStart + 2, entries.count), id: \.self) { entryIndex in
+                                    let entry = entries[entryIndex]
+                                    VStack(alignment: .leading, spacing: 6) {
+                                        if entry.imageURL?.hasPrefix("demo://") == true {
+                                            DemoWrappedPhoto(url: entry.imageURL ?? "")
+                                                .aspectRatio(4.0 / 5.0, contentMode: .fill).clipped()
+                                                .overlay { Rectangle().stroke(.black, lineWidth: 2) }
+                                        } else {
+                                            BlurbAsyncImage(url: URL(string: entry.imageURL ?? "")) { $0.resizable().scaledToFill() } placeholder: { Rectangle().fill(.quaternary) }
+                                                .aspectRatio(4.0 / 5.0, contentMode: .fit).clipped().overlay { Rectangle().stroke(.black, lineWidth: 2) }
+                                        }
+                                        if !entry.answer.isEmpty { Text(entry.answer).font(.system(.caption, design: .serif).bold()) }
+                                        Text(entry.authorName.uppercased()).font(.system(size: 8, weight: .black)).tracking(0.8)
+                                    }
+                                    .frame(maxWidth: .infinity, alignment: .topLeading)
                                 }
-                                if !entry.answer.isEmpty { Text(entry.answer).font(.system(.caption, design: .serif).bold()) }
-                                Text(entry.authorName.uppercased()).font(.system(size: 8, weight: .black)).tracking(0.8)
+                                if rowStart + 1 >= entries.count {
+                                    Color.clear.frame(maxWidth: .infinity)
+                                }
                             }
                         }
                     }
@@ -172,10 +217,16 @@ struct MonthlyWrappedView: View {
                 sectionLabel("BLURB MAP")
                 Text("Where the group posted from").font(.system(size: 30, weight: .black, design: .serif)).multilineTextAlignment(.center)
                 ScrollView {
-                    MonthlyCityMap(cities: cities, interactive: false)
+                    MonthlyCityMap(cities: cities, interactive: false, accent: accent)
                 }
             case .final:
-                WrappedNewspaperPage(edition: edition, accent: accent)
+                WrappedNewspaperPage(
+                    edition: edition,
+                    accent: accent,
+                    isExportingPDF: isExportingPDF,
+                    isPremium: currentGroup?.isPremium == true,
+                    exportPDF: exportPDF
+                )
             }
             Rectangle().frame(height: 1)
             Text("TAP LEFT OR RIGHT TO NAVIGATE").font(.system(size: 9, weight: .black)).tracking(1).foregroundStyle(.secondary)
@@ -189,6 +240,24 @@ struct MonthlyWrappedView: View {
     private func stat(_ value: Int, _ label: String) -> some View {
         VStack { Text("\(value)").font(.system(size: 48, weight: .black)); Text(label.uppercased()).font(.caption.bold()) }
             .frame(maxWidth: .infinity).padding().background(Color.white.opacity(0.38)).overlay { Rectangle().stroke(.black, lineWidth: 1.5) }
+    }
+
+    private func exportPDF() {
+        guard let currentGroup else { return }
+        guard currentGroup.isPremium else {
+            showingPremium = true
+            return
+        }
+        guard !isExportingPDF else { return }
+        isExportingPDF = true
+        Task {
+            defer { isExportingPDF = false }
+            do {
+                generatedPDF = WrappedPDF(url: try await NewsletterPDFExporter.makePDF(for: edition))
+            } catch {
+                pdfError = error.localizedDescription
+            }
+        }
     }
 }
 
@@ -217,6 +286,9 @@ private struct DemoWrappedPhoto: View {
 private struct WrappedNewspaperPage: View {
     let edition: NewsletterEdition
     let accent: Color
+    let isExportingPDF: Bool
+    let isPremium: Bool
+    let exportPDF: () -> Void
     private var questions: [(String, [NewsletterEntry])] {
         Dictionary(grouping: edition.entries.filter { $0.imageURL == nil && !$0.answer.isEmpty }, by: \.promptID)
             .values.compactMap { entries in entries.first.map { ($0.prompt, entries.sorted { $0.authorName < $1.authorName }) } }
@@ -253,45 +325,88 @@ private struct WrappedNewspaperPage: View {
                 if !edition.stats.cities.isEmpty {
                     VStack(alignment: .leading, spacing: 10) {
                         Text("THE MONTH ON THE MAP").font(.caption.weight(.black)).tracking(1).padding(5).background(accent)
-                        MonthlyCityMap(cities: edition.stats.cities, interactive: false)
+                        MonthlyCityMap(cities: edition.stats.cities, interactive: false, accent: accent)
                     }
                 }
-                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], alignment: .leading, spacing: 14) {
-                    ForEach(Array(questions.enumerated()), id: \.offset) { index, question in
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("\(String(format: "%02d", index + 1)) · THE MONTH IN WORDS").font(.system(size: 7, weight: .black)).tracking(0.7).foregroundStyle(.secondary)
-                            Text(question.0).font(.system(size: 16, weight: .bold, design: .serif))
-                            ForEach(question.1) { entry in
-                                VStack(alignment: .leading, spacing: 1) {
-                                    Text(entry.authorName.uppercased()).font(.system(size: 6, weight: .black)).tracking(0.5)
-                                    Text(entry.answer).font(.system(size: 9, design: .serif)).lineLimit(5)
+                LazyVStack(spacing: 14) {
+                    ForEach(Array(stride(from: 0, to: questions.count, by: 2)), id: \.self) { rowStart in
+                        HStack(alignment: .top, spacing: 14) {
+                            ForEach(rowStart..<min(rowStart + 2, questions.count), id: \.self) { questionIndex in
+                                let question = questions[questionIndex]
+                                VStack(alignment: .leading, spacing: 8) {
+                                    Text("\(String(format: "%02d", questionIndex + 1)) · THE MONTH IN WORDS").font(.system(size: 7, weight: .black)).tracking(0.7).foregroundStyle(.secondary)
+                                    Text(question.0).font(.system(size: 16, weight: .bold, design: .serif))
+                                    ForEach(question.1) { entry in
+                                        VStack(alignment: .leading, spacing: 1) {
+                                            Text(entry.authorName.uppercased()).font(.system(size: 6, weight: .black)).tracking(0.5)
+                                            Text(entry.answer).font(.system(size: 9, design: .serif)).lineLimit(5)
+                                        }
+                                    }
                                 }
+                                .frame(maxWidth: .infinity, alignment: .topLeading)
+                                .padding(.trailing, 8)
+                                .overlay(alignment: .trailing) { Rectangle().frame(width: 1) }
                             }
-                        }.padding(.trailing, 8).overlay(alignment: .trailing) { Rectangle().frame(width: 1) }
+                            if rowStart + 1 >= questions.count {
+                                Color.clear.frame(maxWidth: .infinity)
+                            }
+                        }
                     }
                 }
                 ForEach(Array(photoGroups.enumerated()), id: \.offset) { _, group in
                     VStack(alignment: .leading, spacing: 10) {
                         Text(group.0.uppercased()).font(.caption.weight(.black)).tracking(1).padding(5).background(accent)
-                        LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
-                            ForEach(group.1) { entry in
-                                VStack(alignment: .leading, spacing: 4) {
-                                    if entry.imageURL?.hasPrefix("demo://") == true {
-                                        DemoWrappedPhoto(url: entry.imageURL ?? "")
-                                            .aspectRatio(4.0 / 3.0, contentMode: .fill).clipped()
-                                    } else {
-                                        BlurbAsyncImage(url: URL(string: entry.imageURL ?? "")) { $0.resizable().scaledToFill() } placeholder: { Rectangle().fill(.quaternary) }
-                                            .aspectRatio(4.0 / 3.0, contentMode: .fit).clipped()
+                        LazyVStack(spacing: 12) {
+                            ForEach(Array(stride(from: 0, to: group.1.count, by: 2)), id: \.self) { rowStart in
+                                HStack(alignment: .top, spacing: 12) {
+                                    ForEach(rowStart..<min(rowStart + 2, group.1.count), id: \.self) { entryIndex in
+                                        let entry = group.1[entryIndex]
+                                        VStack(alignment: .leading, spacing: 4) {
+                                            if entry.imageURL?.hasPrefix("demo://") == true {
+                                                DemoWrappedPhoto(url: entry.imageURL ?? "")
+                                                    .aspectRatio(4.0 / 3.0, contentMode: .fill).clipped()
+                                            } else {
+                                                BlurbAsyncImage(url: URL(string: entry.imageURL ?? "")) { $0.resizable().scaledToFill() } placeholder: { Rectangle().fill(.quaternary) }
+                                                    .aspectRatio(4.0 / 3.0, contentMode: .fit).clipped()
+                                            }
+                                            Text(entry.answer).font(.system(size: 9, weight: .bold, design: .serif))
+                                            Text(entry.authorName.uppercased()).font(.system(size: 7, weight: .black))
+                                        }
+                                        .frame(maxWidth: .infinity, alignment: .topLeading)
+                                        .overlay { Rectangle().stroke(.black, lineWidth: 1) }
                                     }
-                                    Text(entry.answer).font(.system(size: 9, weight: .bold, design: .serif))
-                                    Text(entry.authorName.uppercased()).font(.system(size: 7, weight: .black))
-                                }.overlay { Rectangle().stroke(.black, lineWidth: 1) }
+                                    if rowStart + 1 >= group.1.count {
+                                        Color.clear.frame(maxWidth: .infinity)
+                                    }
+                                }
                             }
                         }
                     }
                 }
                 Rectangle().frame(height: 4)
                 Text("A month looks different through everyone’s eyes.").font(.system(.body, design: .serif)).italic().frame(maxWidth: .infinity)
+
+                Button(action: exportPDF) {
+                    HStack(spacing: 10) {
+                        if isExportingPDF {
+                            ProgressView()
+                                .tint(.black)
+                        } else {
+                            Image(systemName: isPremium ? "arrow.down.doc.fill" : "lock.fill")
+                        }
+                        Text(isExportingPDF ? "CREATING PDF…" : "EXPORT TO PDF")
+                            .font(.caption.weight(.black))
+                            .tracking(1)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 48)
+                    .background(accent)
+                    .overlay { Rectangle().stroke(.black, lineWidth: 2) }
+                }
+                .buttonStyle(.plain)
+                .disabled(isExportingPDF)
+                .accessibilityHint(isPremium
+                    ? "Creates and opens the newsletter PDF"
+                    : "Opens Blurb Premium for this group")
             }.padding(.vertical, 6)
         }
     }
@@ -301,8 +416,24 @@ private struct WrappedNewspaperPage: View {
     }
 }
 
+private struct WrappedPDF: Identifiable {
+    let id = UUID()
+    let url: URL
+}
+
+private struct WrappedPDFShareSheet: UIViewControllerRepresentable {
+    let url: URL
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: [url], applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
+}
+
 private struct WrappedShareCard: View {
     let edition: NewsletterEdition
+    let accent: Color
     var body: some View {
         ZStack {
             Color(red: 0.96, green: 0.93, blue: 0.82)
@@ -325,7 +456,7 @@ private struct WrappedShareCard: View {
     }
     private func shareStat(_ value: Int, _ title: String) -> some View {
         VStack(alignment: .leading, spacing: 8) { Text("\(value)").font(.system(size: 64, weight: .black)); Text(title).font(.system(size: 20, weight: .bold)).tracking(2) }
-            .frame(maxWidth: .infinity, alignment: .leading).padding(24).background(Color(red: 1, green: 0.78, blue: 0.02)).overlay { Rectangle().stroke(.black, lineWidth: 3) }
+            .frame(maxWidth: .infinity, alignment: .leading).padding(24).background(accent).overlay { Rectangle().stroke(.black, lineWidth: 3) }
     }
 }
 

@@ -32,6 +32,14 @@ func preparedJPEG(from data: Data, maxDimension: CGFloat = 1_600) -> Data? {
     return resized.jpegData(compressionQuality: 0.82)
 }
 
+func waitForNextBlurbDay() async throws {
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = TimeZone(identifier: "America/Los_Angeles")!
+    let today = calendar.startOfDay(for: .now)
+    let tomorrow = calendar.date(byAdding: .day, value: 1, to: today) ?? .now.addingTimeInterval(86_400)
+    try await Task.sleep(for: .seconds(max(1, tomorrow.timeIntervalSinceNow + 1)))
+}
+
 struct CroppedProfilePhotoPicker: UIViewControllerRepresentable {
     @Binding var isPresented: Bool
     let onComplete: (Data) -> Void
@@ -117,6 +125,7 @@ struct ContentView: View {
     @State private var showingNewsletterQuestions = false
     @State private var showingBlurbMapAnnouncement = false
     @State private var showingNewsletterUpdate = false
+    @State private var newsletterReadRevision = 0
     @AppStorage("birthdayQuestionsEnabled") private var birthdayQuestionsEnabled = false
     @AppStorage("birthdayQuestion") private var birthdayQuestion = ""
     @AppStorage("birthdayTimestamp") private var birthdayTimestamp = Date.now.timeIntervalSince1970
@@ -148,8 +157,18 @@ struct ContentView: View {
         }
         .task {
             while !Task.isCancelled {
-                dailyPromptClock = .now
-                try? await Task.sleep(for: .seconds(60))
+                do {
+                    try await waitForNextBlurbDay()
+                    dailyPromptClock = .now
+                } catch {
+                    return
+                }
+            }
+        }
+        .task(id: missingPreviousReportGroupIDs) {
+            for groupID in missingPreviousReportGroupIDs.split(separator: ",").map(String.init) {
+                guard !Task.isCancelled else { return }
+                await blurbStore.ensurePreviousNewsletter(in: groupID)
             }
         }
         .fullScreenCover(isPresented: Binding(
@@ -239,18 +258,18 @@ struct ContentView: View {
                             }
                         }
 
-                        if !newsletterPrompts.isEmpty {
+                        if newsletterPromptSlotCount > 0 {
                             Button { showingNewsletterQuestions = true } label: {
                                 HStack(spacing: 12) {
                                     Image(systemName: "newspaper.fill")
                                         .font(.title2)
                                     VStack(alignment: .leading, spacing: 3) {
-                                        Text(newsletterPrompts.count == 1
-                                             ? "HEY, YOU HAVE A MONTHLY QUESTION TO ANSWER"
-                                             : "\(newsletterPrompts.count) MONTHLY QUESTIONS ARE READY")
+                                        Text(newsletterBannerTitle)
                                             .font(.caption.weight(.black))
                                             .tracking(0.7)
-                                        Text("Separate from today’s Daily Blurb · no points · editable through month-end")
+                                        Text(newsletterQuestionsComplete
+                                             ? "You’re caught up · tap to review or edit"
+                                             : "Separate from today’s Daily Blurb · no points · editable through month-end")
                                             .font(.caption)
                                             .multilineTextAlignment(.leading)
                                     }
@@ -258,12 +277,18 @@ struct ContentView: View {
                                     Image(systemName: "chevron.right")
                                         .font(.caption.bold())
                                 }
-                                .foregroundStyle(.black)
+                                .foregroundStyle(newsletterQuestionsComplete ? Color.primary : .black)
                                 .padding(14)
                                 .frame(maxWidth: .infinity, alignment: .leading)
-                                .background(Color(red: 1, green: 0.78, blue: 0.02), in: RoundedRectangle(cornerRadius: 8))
+                                .background(
+                                    newsletterQuestionsComplete
+                                        ? Color(uiColor: .systemGray4)
+                                        : Color(red: 1, green: 0.78, blue: 0.02),
+                                    in: RoundedRectangle(cornerRadius: 8)
+                                )
                             }
                             .buttonStyle(.plain)
+                            .animation(.easeInOut(duration: 0.22), value: newsletterQuestionsComplete)
                         }
 
                         HomePromptCard(
@@ -294,10 +319,51 @@ struct ContentView: View {
                                 .padding(.vertical, 48)
                         } else {
                             ForEach(blurbStore.groups) { group in
-                                NavigationLink(value: group) {
-                                    HomeGroupCard(group: group)
+                                let latestEdition = latestNewsletterEdition(for: group)
+                                let showsReportBanner = latestEdition.map(shouldShowReportBanner) ?? false
+                                ZStack(alignment: .bottom) {
+                                    NavigationLink(value: group) {
+                                        HomeGroupCard(
+                                            group: group,
+                                            reservesReportBannerSpace: showsReportBanner
+                                        )
+                                    }
+                                    .buttonStyle(.plain)
+
+                                    if let latestEdition, showsReportBanner {
+                                        NavigationLink {
+                                            MonthlyWrappedView(edition: latestEdition)
+                                                .onAppear {
+                                                    markReportSeen(latestEdition)
+                                                }
+                                        } label: {
+                                            HStack(spacing: 10) {
+                                                Image(systemName: "newspaper.fill")
+                                                    .font(.headline)
+                                                VStack(alignment: .leading, spacing: 1) {
+                                                    Text("\(latestEdition.monthLabel.uppercased()) WRAPPED IS HERE")
+                                                        .font(.caption.weight(.black))
+                                                        .tracking(0.6)
+                                                    Text("Tap to see your group’s month")
+                                                        .font(.caption2.weight(.semibold))
+                                                }
+                                                Spacer(minLength: 4)
+                                                Image(systemName: "chevron.right")
+                                                    .font(.caption.bold())
+                                            }
+                                            .foregroundStyle(.black)
+                                            .padding(.horizontal, 13)
+                                            .frame(maxWidth: .infinity, minHeight: 46, alignment: .leading)
+                                            .background(group.themeColor, in: RoundedRectangle(cornerRadius: 7))
+                                            .contentShape(RoundedRectangle(cornerRadius: 7))
+                                        }
+                                        .buttonStyle(.plain)
+                                        .padding(.horizontal, 17)
+                                        .padding(.bottom, 14)
+                                        .zIndex(1)
+                                        .accessibilityLabel("Open \(latestEdition.monthLabel) Wrapped for \(group.name)")
+                                    }
                                 }
-                                .buttonStyle(.plain)
                             }
                         }
                     }
@@ -347,8 +413,10 @@ struct ContentView: View {
                 .presentationBackground(.ultraThinMaterial)
             }
             .sheet(isPresented: $showingNewsletterQuestions) {
-                NewsletterQuestionsView(groups: blurbStore.groups, date: dailyPromptClock)
-                    .presentationBackground(.ultraThinMaterial)
+                NavigationStack {
+                    NewsletterQuestionsView(groups: blurbStore.groups, date: dailyPromptClock)
+                }
+                .presentationBackground(.ultraThinMaterial)
             }
             .sheet(isPresented: $showingTodayAnswers) {
                 TodayAnswersView(groups: blurbStore.groups, prompt: todayPrompt)
@@ -357,6 +425,9 @@ struct ContentView: View {
             }
             .task(id: todayPrompt.id) {
                 blurbStore.listenForAnswerCounts(promptID: todayPrompt.id)
+            }
+            .task(id: newsletterMonthKey) {
+                blurbStore.refreshNewsletterProgressListeners(for: dailyPromptClock, force: true)
             }
         }
     }
@@ -376,9 +447,89 @@ struct ContentView: View {
         QuestionBank.releasedNewsletterPrompts(for: dailyPromptClock)
     }
 
+    private var newsletterMonthKey: String {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "America/Los_Angeles")!
+        let components = calendar.dateComponents([.year, .month], from: dailyPromptClock)
+        return String(format: "%04d-%02d", components.year ?? 0, components.month ?? 0)
+    }
+
+    private var previousNewsletterMonthKey: String {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "America/Los_Angeles")!
+        let previousMonth = calendar.date(byAdding: .month, value: -1, to: dailyPromptClock) ?? dailyPromptClock
+        let components = calendar.dateComponents([.year, .month], from: previousMonth)
+        return String(format: "%04d-%02d", components.year ?? 0, components.month ?? 0)
+    }
+
+    private var missingPreviousReportGroupIDs: String {
+        guard blurbStore.groupsLoaded else { return "" }
+        let groupsWithReport = Set(
+            blurbStore.newsletterEditions
+                .filter { $0.monthKey == previousNewsletterMonthKey }
+                .map(\.groupID)
+        )
+        return blurbStore.groups
+            .filter { !$0.isExample && !groupsWithReport.contains($0.id) }
+            .map(\.id)
+            .sorted()
+            .joined(separator: ",")
+    }
+
+    private var newsletterPromptSlotCount: Int {
+        blurbStore.groups.reduce(0) { total, group in
+            total + newsletterPrompts.count
+                + (blurbStore.customNewsletterQuestionsByGroup[group.id]?.count ?? 0)
+        }
+    }
+
+    private var unansweredNewsletterAnswerCount: Int {
+        blurbStore.groups.reduce(0) { total, group in
+            let answeredPromptIDs = blurbStore.newsletterAnswerPromptIDsByGroup[group.id] ?? []
+            let prompts = newsletterPrompts
+                + (blurbStore.customNewsletterQuestionsByGroup[group.id] ?? []).map(\.prompt)
+            return total + prompts.filter { !answeredPromptIDs.contains($0.id) }.count
+        }
+    }
+
+    private var newsletterQuestionsComplete: Bool {
+        newsletterPromptSlotCount > 0 && unansweredNewsletterAnswerCount == 0
+    }
+
+    private var newsletterBannerTitle: String {
+        if newsletterQuestionsComplete {
+            return "MONTHLY QUESTIONS COMPLETE"
+        }
+        if unansweredNewsletterAnswerCount == 1 {
+            return "1 MONTHLY QUESTION TO ANSWER"
+        }
+        return "\(unansweredNewsletterAnswerCount) MONTHLY ANSWERS TO FINISH"
+    }
+
     private var hasAnsweredAllGroups: Bool {
         !blurbStore.groups.isEmpty
             && blurbStore.groups.allSatisfy { blurbStore.myAnswerStatusByGroup[$0.id] == true }
+    }
+
+    private func latestNewsletterEdition(for group: BlurbGroup) -> NewsletterEdition? {
+        blurbStore.newsletterEditions
+            .filter { $0.groupID == group.id }
+            .max { $0.monthKey < $1.monthKey }
+    }
+
+    private func shouldShowReportBanner(_ edition: NewsletterEdition) -> Bool {
+        _ = newsletterReadRevision
+        return !UserDefaults.standard.bool(forKey: reportSeenKey(for: edition))
+    }
+
+    private func markReportSeen(_ edition: NewsletterEdition) {
+        UserDefaults.standard.set(true, forKey: reportSeenKey(for: edition))
+        newsletterReadRevision += 1
+    }
+
+    private func reportSeenKey(for edition: NewsletterEdition) -> String {
+        let userID = auth.user?.uid ?? "signed-out"
+        return "dailyBlurb.seenNewsletter.\(userID).\(edition.groupID).\(edition.monthKey)"
     }
 
     private func offerHomeAudience() {
@@ -503,7 +654,7 @@ private struct NewsletterUpdateAnnouncementView: View {
                     updateRule(
                         icon: "photo.badge.plus",
                         title: "Build the finished edition",
-                        text: "Official and group-added answers join each member’s captioned Photo and Song of the Month, plus the group’s monthly highlights."
+                        text: "Official and group-added answers join each member’s captioned Photo of the Month, plus the group’s monthly highlights."
                     )
 
                     Text("Want to see these rules again? Open **Settings → How Questions Work**.")
@@ -640,10 +791,9 @@ struct NewsletterQuestionsView: View {
     }
 
     var body: some View {
-        NavigationStack {
-            ZStack {
-                GlassBackground()
-                ScrollView {
+        ZStack {
+            GlassBackground()
+            ScrollView {
                     VStack(alignment: .leading, spacing: 18) {
                         VStack(alignment: .leading, spacing: 6) {
                             Text("MONTHLY NEWSLETTER")
@@ -735,76 +885,76 @@ struct NewsletterQuestionsView: View {
                         }
                     }
                     .padding()
+            }
+        }
+        .navigationTitle("Newsletter questions")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .confirmationAction) {
+                Button("Done") { dismiss() }
+            }
+        }
+        .sheet(item: $answerTarget, onDismiss: offerNewsletterReuse) { target in
+            NewPostView(
+                prompt: target.prompt.question,
+                initialAnswer: target.existingAnswer?.answer,
+                themeSeed: target.group.name,
+                accent: target.group.themeColor,
+                isNewsletterAnswer: true
+            ) { answer, _ in
+                let succeeded: Bool
+                if let existing = target.existingAnswer {
+                    succeeded = await blurbStore.editPost(existing, answer: answer)
+                } else {
+                    succeeded = await blurbStore.createPost(
+                        answer: answer,
+                        prompt: target.prompt,
+                        in: target.group.id
+                    )
+                }
+                if succeeded {
+                    await refreshNewsletterAnswer(for: target.prompt, in: target.group)
+                    reuseAnswer = answer
+                    reusePrompt = target.prompt
+                    reuseSourceGroupID = target.group.id
+                }
+                return succeeded
+            }
+            .presentationBackground(.ultraThinMaterial)
+        }
+        .sheet(item: $addQuestionGroup) { group in
+            AddNewsletterQuestionView(group: group, date: date) {
+                await loadCustomNewsletterQuestions(for: group)
+            }
+            .presentationBackground(.ultraThinMaterial)
+        }
+        .confirmationDialog(
+            "Reuse this newsletter answer?",
+            isPresented: $showingReuseOptions,
+            titleVisibility: .visible
+        ) {
+            if reusableGroups.count > 1 {
+                Button("All unanswered groups") {
+                    reuseNewsletterAnswer(in: reusableGroups)
                 }
             }
-            .navigationTitle("Newsletter questions")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { dismiss() }
+            ForEach(reusableGroups) { group in
+                Button(group.name) {
+                    reuseNewsletterAnswer(in: [group])
                 }
             }
-            .sheet(item: $answerTarget, onDismiss: offerNewsletterReuse) { target in
-                NewPostView(
-                    prompt: target.prompt.question,
-                    initialAnswer: target.existingAnswer?.answer,
-                    themeSeed: target.group.name,
-                    isNewsletterAnswer: true
-                ) { answer, _ in
-                    let succeeded: Bool
-                    if let existing = target.existingAnswer {
-                        succeeded = await blurbStore.editPost(existing, answer: answer)
-                    } else {
-                        succeeded = await blurbStore.createPost(
-                            answer: answer,
-                            prompt: target.prompt,
-                            in: target.group.id
-                        )
-                    }
-                    if succeeded {
-                        await refreshNewsletterAnswer(for: target.prompt, in: target.group)
-                        reuseAnswer = answer
-                        reusePrompt = target.prompt
-                        reuseSourceGroupID = target.group.id
-                    }
-                    return succeeded
-                }
-                .presentationBackground(.ultraThinMaterial)
-            }
-            .sheet(item: $addQuestionGroup) { group in
-                AddNewsletterQuestionView(group: group, date: date) {
-                    await loadCustomNewsletterQuestions(for: group)
-                }
-                .presentationBackground(.ultraThinMaterial)
-            }
-            .confirmationDialog(
-                "Reuse this newsletter answer?",
-                isPresented: $showingReuseOptions,
-                titleVisibility: .visible
-            ) {
-                if reusableGroups.count > 1 {
-                    Button("All unanswered groups") {
-                        reuseNewsletterAnswer(in: reusableGroups)
-                    }
-                }
-                ForEach(reusableGroups) { group in
-                    Button(group.name) {
-                        reuseNewsletterAnswer(in: [group])
-                    }
-                }
-                Button("Not now", role: .cancel) { clearReuseDraft() }
-            } message: {
-                Text("This adds the same answer to the group you choose. Your original answer stays where it is—there’s nothing to paste.")
-            }
-            .alert("Answer reused", isPresented: $showingReuseResult) {
-                Button("OK", role: .cancel) {}
-            } message: {
-                Text(reuseResultMessage)
-            }
-            .task {
-                await loadCustomNewsletterQuestions()
-                await loadNewsletterAnswers()
-            }
+            Button("Not now", role: .cancel) { clearReuseDraft() }
+        } message: {
+            Text("This adds the same answer to the group you choose. Your original answer stays where it is—there’s nothing to paste.")
+        }
+        .alert("Answer reused", isPresented: $showingReuseResult) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(reuseResultMessage)
+        }
+        .task {
+            await loadCustomNewsletterQuestions()
+            await loadNewsletterAnswers()
         }
     }
 
@@ -1271,7 +1421,7 @@ private struct HomePromptCard: View {
     let action: () -> Void
 
     private var accent: Color {
-        Color(red: 1, green: 0.78, blue: 0.02)
+        GroupTheme.gold.color
     }
 
     private var ruleColor: Color {
@@ -1412,6 +1562,7 @@ private struct TodayAnswersView: View {
                     prompt: target.post.prompt,
                     initialAnswer: answerOverrides[target.post.id] ?? target.post.answer,
                     themeSeed: target.group.name,
+                    accent: target.group.themeColor,
                     pollOptions: target.post.pollOptions
                 ) { answer, _ in
                     let saved = await blurbStore.editPost(target.post, answer: answer)
@@ -1518,11 +1669,12 @@ private struct HomeGroupCard: View {
     @Environment(\.colorScheme) private var colorScheme
     @EnvironmentObject private var blurbStore: BlurbStore
     let group: BlurbGroup
+    let reservesReportBannerSpace: Bool
     @State private var members: [GroupMemberProfile] = []
     @State private var avatarsExpanded = false
 
     private var accent: Color {
-        Color(red: 1, green: 0.78, blue: 0.02)
+        group.themeColor
     }
 
     private var ruleColor: Color {
@@ -1556,7 +1708,7 @@ private struct HomeGroupCard: View {
         let answeredMemberIDs = blurbStore.answeringMemberIDsByGroup[group.id] ?? []
 
         ZStack(alignment: .topLeading) {
-            VibrantCardBackground(seed: group.name)
+            VibrantCardBackground(seed: group.name, accent: accent)
 
             VStack(alignment: .leading, spacing: 0) {
                 HStack(spacing: 8) {
@@ -1642,10 +1794,16 @@ private struct HomeGroupCard: View {
                         .foregroundStyle(.black)
                 }
                 .foregroundStyle(.primary)
+
+                if reservesReportBannerSpace {
+                    Color.clear
+                        .frame(height: 52)
+                        .accessibilityHidden(true)
+                }
             }
             .padding(17)
         }
-        .frame(height: 142)
+        .frame(height: reservesReportBannerSpace ? 194 : 142)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay { RoundedRectangle(cornerRadius: 8).stroke(ruleColor, lineWidth: 2) }
         .task(id: "\(group.id)-\(group.memberIDs.count)") {
@@ -1679,6 +1837,7 @@ private struct HomeAnswerAvatar: View {
 private struct VibrantCardBackground: View {
     @Environment(\.colorScheme) private var colorScheme
     let seed: String
+    var accent: Color = GroupTheme.gold.color
 
     var body: some View {
         ZStack {
@@ -1686,7 +1845,7 @@ private struct VibrantCardBackground: View {
                 ? Color(red: 0.14, green: 0.14, blue: 0.14)
                 : Color(red: 0.985, green: 0.975, blue: 0.93)
             Rectangle()
-                .fill(Color(red: 1, green: 0.78, blue: 0.02))
+                .fill(accent)
                 .frame(width: 12)
                 .frame(maxWidth: .infinity, alignment: .leading)
             VStack(spacing: 5) {
@@ -1861,13 +2020,19 @@ private struct GroupFeedView: View {
     @AppStorage("compactFeedEnabled") private var compactFeedEnabled = false
     let group: BlurbGroup
 
+    private var currentGroup: BlurbGroup {
+        blurbStore.groups.first(where: { $0.id == group.id }) ?? group
+    }
+
+    private var accent: Color { currentGroup.themeColor }
+
     var body: some View {
         ZStack {
             GlassBackground()
             ScrollViewReader { proxy in
             ScrollView {
                 VStack(spacing: 22) {
-                    Text(group.name)
+                    Text(currentGroup.name)
                         .font(.system(size: 38, weight: .bold, design: .serif))
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal)
@@ -1888,13 +2053,21 @@ private struct GroupFeedView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
+                NavigationLink {
+                    GroupPremiumHubView(group: currentGroup)
+                } label: {
+                    Image(systemName: currentGroup.isPremium ? "crown.fill" : "crown")
+                        .foregroundStyle(currentGroup.isPremium ? accent : .primary)
+                }
+                .accessibilityLabel("\(group.name) Premium")
+
                 Button { showingMembers = true } label: {
                     Image(systemName: "person.2.fill")
                 }
                 .accessibilityLabel("View members of \(group.name)")
 
                 NavigationLink {
-                    PhotoOfMonthPickerView(group: group)
+                    PhotoOfMonthPickerView(group: currentGroup)
                 } label: {
                     Image(systemName: "photo.badge.plus")
                         .overlay(alignment: .topTrailing) {
@@ -1911,7 +2084,7 @@ private struct GroupFeedView: View {
                 .accessibilityLabel("Choose Photo of the Month")
 
                 NavigationLink {
-                    GroupNewsletterHomeView(group: group)
+                    GroupNewsletterHomeView(group: currentGroup)
                 } label: {
                     Image(systemName: "newspaper.fill")
                 }
@@ -1922,7 +2095,7 @@ private struct GroupFeedView: View {
             blurbStore.select(group)
         }
         .sheet(isPresented: $showingMembers) {
-            GroupMembersView(group: group)
+            GroupMembersView(group: currentGroup)
                 .presentationDetents([.medium, .large])
                 .presentationBackground(.ultraThinMaterial)
         }
@@ -1934,8 +2107,12 @@ private struct GroupFeedView: View {
         }
         .task {
             while !Task.isCancelled {
-                dailyPromptClock = .now
-                try? await Task.sleep(for: .seconds(60))
+                do {
+                    try await waitForNextBlurbDay()
+                    dailyPromptClock = .now
+                } catch {
+                    return
+                }
             }
         }
         .sheet(isPresented: $showingNewPost, onDismiss: offerReuseIfAvailable) {
@@ -1943,6 +2120,7 @@ private struct GroupFeedView: View {
                 prompt: todayPrompt.question,
                 initialAnswer: nil,
                 themeSeed: group.name,
+                accent: accent,
                 requiresPhoto: todayPrompt.requiresPhoto,
                 pollOptions: todayPrompt.pollOptions
             ) { answer, imageData in
@@ -1956,7 +2134,7 @@ private struct GroupFeedView: View {
             .presentationBackground(.ultraThinMaterial)
         }
         .sheet(item: $postToEdit) { post in
-            NewPostView(prompt: post.prompt, initialAnswer: post.answer, themeSeed: group.name, pollOptions: post.pollOptions) { answer, _ in
+            NewPostView(prompt: post.prompt, initialAnswer: post.answer, themeSeed: group.name, accent: accent, pollOptions: post.pollOptions) { answer, _ in
                 await blurbStore.editPost(post, answer: answer)
             }
             .presentationBackground(.ultraThinMaterial)
@@ -2013,7 +2191,7 @@ private struct GroupFeedView: View {
                             .foregroundStyle(.black)
                             .padding(.horizontal, 10)
                             .padding(.vertical, 6)
-                            .background(Color(red: 1, green: 0.78, blue: 0.02))
+                            .background(accent)
                     } else {
                         HStack {
                             Text("Tap to answer")
@@ -2028,7 +2206,12 @@ private struct GroupFeedView: View {
                 .foregroundStyle(.primary)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(18)
-                .background { VibrantCardBackground(seed: group.name) }
+                .background {
+                    VibrantCardBackground(
+                        seed: group.name,
+                        accent: accent
+                    )
+                }
                 .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                 .overlay {
                     RoundedRectangle(cornerRadius: 8)
@@ -2172,6 +2355,10 @@ struct PostCard: View {
 
     private var hasEarnedBadges: Bool {
         badgeProgress.contains { $0.earned != nil }
+    }
+
+    private var groupAccent: Color {
+        blurbStore.groups.first(where: { $0.id == post.groupID })?.themeColor ?? GroupTheme.gold.color
     }
 
     var body: some View {
@@ -2360,7 +2547,7 @@ struct PostCard: View {
                         }
                     }
                     if hasEarnedBadges {
-                        EarnedBadges(progress: badgeProgress)
+                        EarnedBadges(progress: badgeProgress, accent: groupAccent)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -2370,8 +2557,14 @@ struct PostCard: View {
     }
 
     @ViewBuilder private var postMenu: some View {
-        if editAnswer != nil || deleteAnswer != nil || (!post.isSample && post.authorID != currentUserID) {
+        if !post.isSample || editAnswer != nil || deleteAnswer != nil {
             Menu {
+                if !post.isSample {
+                    Button(blurbStore.isSavedToLore(post) ? "Remove from Group Lore" : "Save to Group Lore",
+                           systemImage: blurbStore.isSavedToLore(post) ? "bookmark.slash" : "bookmark") {
+                        Task { await blurbStore.toggleLore(post) }
+                    }
+                }
                 if editAnswer != nil {
                     Button("Edit answer") { showingPostEditor = true }
                 }
@@ -2520,7 +2713,7 @@ struct PostCard: View {
     }
 
     private var replyAccent: Color {
-        Color(red: 1, green: 0.78, blue: 0.02)
+        groupAccent
     }
 
     private var commentTabFill: Color {
@@ -2531,7 +2724,7 @@ struct PostCard: View {
 
     private var rankColor: Color? {
         switch currentRank {
-        case 1: return Color(red: 0.92, green: 0.68, blue: 0.05)
+        case 1: return groupAccent
         case 2: return Color.gray
         case 3: return Color(red: 0.65, green: 0.38, blue: 0.18)
         default: return nil
@@ -2691,6 +2884,7 @@ struct NewPostView: View {
     let prompt: String
     let initialAnswer: String?
     let themeSeed: String
+    let accent: Color
     let requiresPhoto: Bool
     let pollOptions: [String]
     let isNewsletterAnswer: Bool
@@ -2700,6 +2894,7 @@ struct NewPostView: View {
         prompt: String,
         initialAnswer: String?,
         themeSeed: String,
+        accent: Color = GroupTheme.gold.color,
         requiresPhoto: Bool = false,
         pollOptions: [String] = [],
         isNewsletterAnswer: Bool = false,
@@ -2708,6 +2903,7 @@ struct NewPostView: View {
         self.prompt = prompt
         self.initialAnswer = initialAnswer
         self.themeSeed = themeSeed
+        self.accent = accent
         self.requiresPhoto = requiresPhoto
         self.pollOptions = pollOptions
         self.isNewsletterAnswer = isNewsletterAnswer
@@ -2728,7 +2924,7 @@ struct NewPostView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .frame(height: promptHeight, alignment: .leading)
                         .padding(22)
-                        .background { VibrantCardBackground(seed: themeSeed) }
+                        .background { VibrantCardBackground(seed: themeSeed, accent: accent) }
                         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                         .overlay {
                             RoundedRectangle(cornerRadius: 8)
@@ -2796,7 +2992,7 @@ struct NewPostView: View {
                                         .font(.headline.weight(.bold))
                                 }
                             }
-                            .foregroundStyle(Color(red: 1, green: 0.78, blue: 0.02))
+                            .foregroundStyle(accent)
                             // Keep the control a soft square initially, then
                             // grow it vertically with the answer field.
                             .frame(width: 58, height: composerHeight, alignment: .center)
@@ -2828,7 +3024,7 @@ struct NewPostView: View {
                                     .padding(15)
                                     .background(
                                         answer == option
-                                            ? Color(red: 1, green: 0.78, blue: 0.02).opacity(0.34)
+                                            ? accent.opacity(0.34)
                                             : Color.primary.opacity(0.06),
                                         in: RoundedRectangle(cornerRadius: 14)
                                     )
@@ -2944,7 +3140,7 @@ struct CommentsView: View {
     }
 
     private var accent: Color {
-        Color(red: 1, green: 0.78, blue: 0.02)
+        blurbStore.groups.first(where: { $0.id == post.groupID })?.themeColor ?? GroupTheme.gold.color
     }
 
     private var borderColor: Color {
@@ -2968,7 +3164,7 @@ struct CommentsView: View {
                                 .padding(.horizontal, 8)
                                 .padding(.vertical, 5)
                                 .foregroundStyle(.black)
-                                .background(Color(red: 1, green: 0.78, blue: 0.02))
+                                .background(accent)
                         }
 
                         responseSummary
@@ -3497,6 +3693,10 @@ struct ProfileView: View {
         "\(Date.now.formatted(.dateTime.month(.abbreviated))) points"
     }
 
+    private var selectedGroupAccent: Color {
+        blurbStore.selectedGroup?.themeColor ?? GroupTheme.gold.color
+    }
+
     var body: some View {
         NavigationStack {
             ZStack {
@@ -3529,7 +3729,7 @@ struct ProfileView: View {
                                     .foregroundStyle(.black)
                                     .padding(.horizontal, 9)
                                     .padding(.vertical, 5)
-                                    .background(Color(red: 1, green: 0.78, blue: 0.02))
+                                    .background(selectedGroupAccent)
                                 Spacer()
                                 Text("ACHIEVEMENTS")
                                     .font(.caption2.bold())
@@ -3542,7 +3742,7 @@ struct ProfileView: View {
                             Text("Progress in \(blurbStore.selectedGroup?.name ?? "your group")")
                                 .font(.caption).foregroundStyle(.secondary)
                             ForEach(blurbStore.myAchievements) { progress in
-                                AchievementRow(progress: progress)
+                                AchievementRow(progress: progress, accent: selectedGroupAccent)
                             }
                             if let winner = blurbStore.lastMonthWinner {
                                 BadgeRow(
@@ -3808,14 +4008,9 @@ private struct QuestionRulesView: View {
                             text: "Choose one photo privately for each group and add an optional caption. You can change either during the month; they are revealed when the finished newsletter is published."
                         )
                         rule(
-                            icon: "music.note",
-                            title: "Song of the Month",
-                            text: "Add a song title and optional artist for each group. Your pick stays private and editable until the finished newsletter is published."
-                        )
-                        rule(
                             icon: "sparkles.rectangle.stack.fill",
                             title: "What goes into the newsletter",
-                            text: "The finished edition includes official and group-added answers, each member’s Photo and Song of the Month, and highlights such as participation, points, reactions, and cities."
+                            text: "The finished edition includes official and group-added answers, each member’s captioned Photo of the Month, and highlights such as participation, points, reactions, and cities."
                         )
 
                         Text("Friday notifications use your Daily Blurb reminder setting. Notifications must also be allowed in iPhone Settings.")
@@ -3932,6 +4127,31 @@ struct SettingsView: View {
                             }
                         }
                         .buttonStyle(.plain)
+
+                        settingsCard(title: "BLURB PREMIUM") {
+                            ForEach(blurbStore.groups) { group in
+                                NavigationLink {
+                                    GroupPremiumHubView(group: group)
+                                } label: {
+                                    HStack(spacing: 12) {
+                                        Image(systemName: group.isPremium ? "crown.fill" : "crown")
+                                            .foregroundStyle(group.isPremium
+                                                             ? (GroupTheme(rawValue: group.themeID)?.color ?? GroupTheme.gold.color)
+                                                             : .secondary)
+                                            .frame(width: 26)
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(group.name).font(.headline)
+                                            Text(group.isPremium ? "Premium active for everyone" : "$15/month for the whole group")
+                                                .font(.caption).foregroundStyle(.secondary)
+                                        }
+                                        Spacer()
+                                        Image(systemName: "chevron.right").font(.caption).foregroundStyle(.secondary)
+                                    }
+                                }
+                                .buttonStyle(.plain)
+                                if group.id != blurbStore.groups.last?.id { Divider() }
+                            }
+                        }
 
                         settingsCard(title: "GROUPS") {
                             if blurbStore.groups.isEmpty {
@@ -4507,6 +4727,7 @@ struct GlassBackground: View {
 
 private struct EarnedBadgeLabel: View {
     let tier: AchievementTier
+    let accent: Color
     @ScaledMetric(relativeTo: .caption2) private var textSize: CGFloat = 9
 
     var body: some View {
@@ -4516,7 +4737,7 @@ private struct EarnedBadgeLabel: View {
                 .tracking(0.5)
         }
         .font(.system(size: textSize, weight: .black, design: .serif))
-        .foregroundStyle(Color(red: 0.88, green: 0.64, blue: 0.02))
+        .foregroundStyle(accent)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(tier.title)
     }
@@ -4525,6 +4746,7 @@ private struct EarnedBadgeLabel: View {
 private struct EarnedBadges: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let progress: [AchievementProgress]
+    let accent: Color
     @State private var expandedIndex: Int?
     @State private var collapseTask: Task<Void, Never>?
 
@@ -4539,12 +4761,12 @@ private struct EarnedBadges: View {
                     expandBadge(at: index)
                 } label: {
                     if expandedIndex == index {
-                        EarnedBadgeLabel(tier: tier)
+                        EarnedBadgeLabel(tier: tier, accent: accent)
                             .fixedSize(horizontal: true, vertical: false)
                     } else {
                         AnimatedBadgeIcon(systemName: tier.icon)
                             .font(.caption.weight(.bold))
-                            .foregroundStyle(Color(red: 0.88, green: 0.64, blue: 0.02))
+                            .foregroundStyle(accent)
                             .frame(width: 15, height: 18)
                             .accessibilityLabel(tier.title)
                     }
@@ -4574,9 +4796,10 @@ private struct EarnedBadges: View {
 
 private struct AchievementRow: View {
     let progress: AchievementProgress
+    let accent: Color
     var body: some View {
         let tier = progress.earned ?? progress.tiers[0]
-        let color = Color(red: 1, green: 0.78, blue: 0.02)
+        let color = accent
         HStack(spacing: 12) {
             AnimatedBadgeIcon(systemName: tier.icon, enabled: progress.earned != nil)
                 .font(.title2.bold())
@@ -4730,13 +4953,14 @@ private struct MemberProfileSheet: View {
                             Text(blurbStore.groups.first { $0.id == groupID }?.name ?? "Group member")
                                 .foregroundStyle(.secondary)
                             let progress = blurbStore.achievements(for: member.id, in: groupID)
-                            EarnedBadges(progress: progress)
+                            let accent = blurbStore.groups.first(where: { $0.id == groupID })?.themeColor ?? GroupTheme.gold.color
+                            EarnedBadges(progress: progress, accent: accent)
                             if progress.allSatisfy({ $0.earned == nil }) {
                                 Text("No badges earned yet").font(.subheadline).foregroundStyle(.secondary)
                             }
                             VStack(alignment: .leading, spacing: 12) {
                                 Text("GROUP ACHIEVEMENTS").font(.caption.bold()).tracking(1)
-                                ForEach(progress) { item in AchievementRow(progress: item) }
+                                ForEach(progress) { item in AchievementRow(progress: item, accent: accent) }
                             }
                             .padding(16)
                             .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 6))

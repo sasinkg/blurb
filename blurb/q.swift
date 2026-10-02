@@ -27,6 +27,7 @@ struct blurbApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var auth: AuthManager
     @StateObject private var blurbStore: BlurbStore
+    @StateObject private var groupPremium = GroupPremiumManager()
     @AppStorage("appAppearance") private var appAppearance = AppAppearance.system.rawValue
 
     init() {
@@ -56,6 +57,7 @@ struct blurbApp: App {
                 }
                 .environmentObject(auth)
                 .environmentObject(blurbStore)
+                .environmentObject(groupPremium)
                 .fontDesign(.serif)
                 .preferredColorScheme(.light)
             } else {
@@ -71,6 +73,7 @@ struct blurbApp: App {
             AuthenticatedAppContent()
             .environmentObject(auth)
             .environmentObject(blurbStore)
+            .environmentObject(groupPremium)
             .fontDesign(.serif)
             .preferredColorScheme(AppAppearance(rawValue: appAppearance)?.colorScheme)
             .onChange(of: auth.user?.uid) { _, userID in

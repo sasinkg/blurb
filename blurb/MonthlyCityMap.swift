@@ -11,6 +11,7 @@ struct MonthlyCityMap: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let cities: [WrappedCityCount]
     var interactive = true
+    var accent: Color = GroupTheme.gold.color
     @State private var pins: [CityMapPin] = []
     @State private var zoom: CGFloat = 1
     @State private var settledZoom: CGFloat = 1
@@ -28,14 +29,14 @@ struct MonthlyCityMap: View {
                     .resizable()
                     .renderingMode(.template)
                     .aspectRatio(contentMode: .fit)
-                    .foregroundStyle(Color(red: 1, green: 0.78, blue: 0.02))
+                    .foregroundStyle(accent)
                     .scaleEffect(zoom)
                     .offset(pan)
 
                 ForEach(pins) { pin in
                     ZStack {
                         Circle().fill(.black)
-                        Circle().stroke(Color(red: 1, green: 0.78, blue: 0.02), lineWidth: 2)
+                        Circle().stroke(accent, lineWidth: 2)
                         Text("\(pin.city.count)")
                             .font(.system(size: 11, weight: .black, design: .rounded))
                             .foregroundStyle(.white)

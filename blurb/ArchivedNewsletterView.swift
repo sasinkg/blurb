@@ -1,8 +1,11 @@
 import SwiftUI
 
 struct ArchivedNewsletterView: View {
+    @EnvironmentObject private var blurbStore: BlurbStore
     let edition: NewsletterEdition
     let isInProgress: Bool
+    @State private var pdfURL: URL?
+    @State private var pdfError: String?
 
     init(edition: NewsletterEdition, isInProgress: Bool = false) {
         self.edition = edition
@@ -10,7 +13,9 @@ struct ArchivedNewsletterView: View {
     }
 
     private let paper = Color(red: 0.96, green: 0.93, blue: 0.82)
-    private let accent = Color(red: 1, green: 0.78, blue: 0.02)
+    private var accent: Color {
+        blurbStore.groups.first(where: { $0.id == edition.groupID })?.themeColor ?? GroupTheme.gold.color
+    }
 
     private var writtenEntries: [NewsletterEntry] {
         edition.entries.filter { $0.imageURL == nil }
@@ -63,6 +68,27 @@ struct ArchivedNewsletterView: View {
         .navigationTitle(edition.monthLabel)
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(paper, for: .navigationBar)
+        .toolbar {
+            if blurbStore.groups.first(where: { $0.id == edition.groupID })?.isPremium == true {
+                ToolbarItem(placement: .topBarTrailing) {
+                    if let pdfURL {
+                        ShareLink(item: pdfURL) { Image(systemName: "square.and.arrow.up") }
+                            .accessibilityLabel("Share newsletter PDF")
+                    } else {
+                        Button {
+                            Task {
+                                do { pdfURL = try await NewsletterPDFExporter.makePDF(for: edition) }
+                                catch { pdfError = error.localizedDescription }
+                            }
+                        } label: { Image(systemName: "doc.richtext") }
+                        .accessibilityLabel("Create newsletter PDF")
+                    }
+                }
+            }
+        }
+        .alert("Couldn’t create PDF", isPresented: Binding(get: { pdfError != nil }, set: { if !$0 { pdfError = nil } })) {
+            Button("OK", role: .cancel) {}
+        } message: { Text(pdfError ?? "Please try again.") }
     }
 
     private var masthead: some View {
@@ -110,7 +136,7 @@ struct ArchivedNewsletterView: View {
         if !edition.stats.cities.isEmpty {
             VStack(alignment: .leading, spacing: 12) {
                 sectionTitle("THE MONTH ON THE MAP")
-                MonthlyCityMap(cities: edition.stats.cities)
+                MonthlyCityMap(cities: edition.stats.cities, accent: accent)
             }
         }
     }

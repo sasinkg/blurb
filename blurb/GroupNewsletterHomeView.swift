@@ -71,12 +71,22 @@ struct GroupNewsletterHomeView: View {
         blurbStore.newsletterEditions.filter { $0.groupID == group.id }
     }
 
+    private var latestArchivedEdition: NewsletterEdition? {
+        archivedEditions.first
+    }
+
     private var generationDate: Date {
         let nextMonth = calendar.date(byAdding: .month, value: 1, to: .now) ?? .now
         var components = calendar.dateComponents([.year, .month], from: nextMonth)
-        components.day = 3
+        components.day = 1
         return calendar.date(from: components) ?? nextMonth
     }
+
+    private var currentGroup: BlurbGroup {
+        blurbStore.groups.first(where: { $0.id == group.id }) ?? group
+    }
+
+    private var accent: Color { currentGroup.themeColor }
 
     var body: some View {
         ZStack {
@@ -96,8 +106,21 @@ struct GroupNewsletterHomeView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 8))
 
+                    if let latestArchivedEdition {
+                        NavigationLink {
+                            MonthlyWrappedView(edition: latestArchivedEdition)
+                        } label: {
+                            newsletterCard(
+                                title: "\(latestArchivedEdition.monthLabel) report",
+                                subtitle: "Your finished monthly newsletter is ready",
+                                icon: "newspaper.fill"
+                            )
+                        }
+                        .buttonStyle(.plain)
+                    }
+
                     NavigationLink {
-                        NewsletterQuestionsView(groups: [group], date: promptClock)
+                        NewsletterQuestionsView(groups: [currentGroup], date: promptClock)
                     } label: {
                         let prompts = QuestionBank.releasedNewsletterPrompts(for: promptClock)
                             + customQuestions.map(\.prompt)
@@ -113,7 +136,7 @@ struct GroupNewsletterHomeView: View {
                     .buttonStyle(.plain)
 
                     NavigationLink {
-                        PhotoOfMonthPickerView(group: group)
+                        PhotoOfMonthPickerView(group: currentGroup)
                     } label: {
                         newsletterCard(
                             title: "Photo of the Month",
@@ -121,19 +144,6 @@ struct GroupNewsletterHomeView: View {
                                 ? "Choose one of your photos privately"
                                 : "Selected — you can change it until month end",
                             icon: blurbStore.photoOfMonthSelection(in: group.id) == nil ? "photo.badge.plus" : "checkmark.circle.fill"
-                        )
-                    }
-                    .buttonStyle(.plain)
-
-                    NavigationLink {
-                        SongOfMonthPickerView(group: group)
-                    } label: {
-                        newsletterCard(
-                            title: "Song of the Month",
-                            subtitle: blurbStore.songOfMonthSelection(in: group.id)?.displayText
-                                ?? "Add the song that defined your month",
-                            icon: blurbStore.songOfMonthSelection(in: group.id) == nil
-                                ? "music.note.list" : "checkmark.circle.fill"
                         )
                     }
                     .buttonStyle(.plain)
@@ -162,8 +172,12 @@ struct GroupNewsletterHomeView: View {
         }
         .task {
             while !Task.isCancelled {
-                promptClock = .now
-                try? await Task.sleep(for: .seconds(60))
+                do {
+                    try await waitForNextBlurbDay()
+                    promptClock = .now
+                } catch {
+                    return
+                }
             }
         }
         .onAppear {
@@ -173,6 +187,9 @@ struct GroupNewsletterHomeView: View {
                     date: promptClock
                 )
             }
+        }
+        .task(id: group.id) {
+            await blurbStore.ensurePreviousNewsletter(in: group.id)
         }
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
@@ -184,7 +201,7 @@ struct GroupNewsletterHomeView: View {
                 .font(.title2)
                 .foregroundStyle(.black)
                 .frame(width: 50, height: 50)
-                .background(Color(red: 1, green: 0.78, blue: 0.02))
+                .background(accent)
             VStack(alignment: .leading, spacing: 4) {
                 Text(title)
                     .font(.system(.title3, design: .serif).bold())
@@ -360,93 +377,6 @@ struct PhotoOfMonthPickerView: View {
                 captionSaved = true
             }
             isSavingCaption = false
-        }
-    }
-}
-
-struct SongOfMonthPickerView: View {
-    @EnvironmentObject private var blurbStore: BlurbStore
-    @Environment(\.dismiss) private var dismiss
-    let group: BlurbGroup
-    @State private var title = ""
-    @State private var artist = ""
-    @State private var isSaving = false
-    @State private var showingRemoveConfirmation = false
-
-    private var selection: SongOfMonthSelection? {
-        blurbStore.songOfMonthSelection(in: group.id)
-    }
-
-    var body: some View {
-        Form {
-            Section {
-                Text("Pick the song that defined your month. It stays private until (group.name)’s newsletter is created, and you can change it until month end.")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-            }
-
-            Section("YOUR PICK") {
-                TextField("Song title", text: $title)
-                    .textInputAutocapitalization(.words)
-                TextField("Artist (optional)", text: $artist)
-                    .textInputAutocapitalization(.words)
-            }
-
-            Section {
-                Button {
-                    saveSong()
-                } label: {
-                    HStack {
-                        Label(selection == nil ? "Save Song of the Month" : "Update Song of the Month", systemImage: "music.note")
-                        Spacer()
-                        if isSaving { ProgressView() }
-                    }
-                }
-                .disabled(
-                    isSaving
-                        || title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                        || title.count > 100
-                        || artist.count > 100
-                )
-
-                if selection != nil {
-                    Button("Remove Song of the Month", role: .destructive) {
-                        showingRemoveConfirmation = true
-                    }
-                    .disabled(isSaving)
-                }
-            } footer: {
-                Text("Song choices do not affect points or your daily streak.")
-            }
-        }
-        .navigationTitle("Song of the Month")
-        .navigationBarTitleDisplayMode(.inline)
-        .onAppear {
-            title = selection?.title ?? ""
-            artist = selection?.artist ?? ""
-        }
-        .confirmationDialog("Remove your song?", isPresented: $showingRemoveConfirmation, titleVisibility: .visible) {
-            Button("Remove song", role: .destructive) {
-                isSaving = true
-                Task {
-                    if await blurbStore.removeSongOfMonth(in: group.id) { dismiss() }
-                    isSaving = false
-                }
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("You can choose another song any time before the newsletter is created.")
-        }
-    }
-
-    private func saveSong() {
-        guard !isSaving else { return }
-        isSaving = true
-        Task {
-            if await blurbStore.saveSongOfMonth(title: title, artist: artist, in: group.id) {
-                dismiss()
-            }
-            isSaving = false
         }
     }
 }

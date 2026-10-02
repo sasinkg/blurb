@@ -6,6 +6,7 @@
     "node": "22"
   },
   "dependencies": {
+    "@apple/app-store-server-library": "^2.0.0",
     "firebase-admin": "^13.4.0",
     "firebase-functions": "^6.4.0"
   }

@@ -11,11 +11,56 @@ struct BlurbGroup: Identifiable, Hashable {
     let memberIDs: [String]
     let inviteCode: String
     var isExample = false
+    var premium: GroupPremiumEntitlement? = nil
+    var themeID: String = GroupTheme.gold.rawValue
 
     var memberCount: Int { memberIDs.count }
     // Example participants are presentation fixtures, never Firebase members.
     var sampleParticipantCount: Int { isExample ? ExampleGroupContent.posts.count : 0 }
     var displayedParticipantCount: Int { memberCount + sampleParticipantCount }
+    var isPremium: Bool { premium?.isActive == true }
+}
+
+struct GroupPremiumEntitlement: Hashable {
+    let productID: String
+    let sponsorID: String
+    let expiresAt: Date
+    let status: String
+
+    var isActive: Bool { status == "active" && expiresAt > .now }
+}
+
+enum GroupTheme: String, CaseIterable, Identifiable {
+    case gold, coral, rose, forest, cobalt, plum
+
+    var id: String { rawValue }
+    var name: String { rawValue.capitalized }
+}
+
+struct GroupLoreItem: Identifiable, Hashable {
+    let id: String
+    let groupID: String
+    let postID: String
+    let authorName: String
+    let authorPhotoURL: String?
+    let prompt: String
+    let answer: String
+    let imageURL: String?
+    let savedByID: String
+    let createdAt: Date
+}
+
+struct TimeCapsule: Identifiable, Hashable {
+    let id: String
+    let groupID: String
+    let kind: String
+    let title: String
+    let creatorID: String
+    let creatorName: String
+    let unlockAt: Date
+    let createdAt: Date
+
+    var isUnlocked: Bool { unlockAt <= .now }
 }
 
 struct GroupNewsletterQuestion: Identifiable, Hashable {
@@ -181,6 +226,10 @@ final class BlurbStore: ObservableObject {
     @Published private(set) var photoOfMonthSelections: [String: PhotoOfMonthSelection] = [:]
     @Published private(set) var photoOfMonthSelectionsLoaded = false
     @Published private(set) var songOfMonthSelections: [String: SongOfMonthSelection] = [:]
+    @Published private(set) var customNewsletterQuestionsByGroup: [String: [GroupNewsletterQuestion]] = [:]
+    @Published private(set) var newsletterAnswerPromptIDsByGroup: [String: Set<String>] = [:]
+    @Published private(set) var loreItems: [GroupLoreItem] = []
+    @Published private(set) var timeCapsules: [TimeCapsule] = []
     @Published var selectedGroupID: String?
     @Published var errorMessage: String?
     @Published private(set) var listenerErrorMessage: String?
@@ -193,6 +242,10 @@ final class BlurbStore: ObservableObject {
     private var newsletterListener: ListenerRegistration?
     private var photoOfMonthListener: ListenerRegistration?
     private var songOfMonthListener: ListenerRegistration?
+    private var customNewsletterQuestionListeners: [String: ListenerRegistration] = [:]
+    private var newsletterAnswerListeners: [String: ListenerRegistration] = [:]
+    private var loreListener: ListenerRegistration?
+    private var timeCapsuleListener: ListenerRegistration?
     private var answerCountListeners: [String: ListenerRegistration] = [:]
     private var commentListeners: [String: ListenerRegistration] = [:]
     private var unfilteredPosts: [BlurbPost] = []
@@ -512,7 +565,7 @@ final class BlurbStore: ObservableObject {
 
         groupsListener = database.collection("groups")
             .whereField("memberIDs", arrayContains: userID)
-            .addSnapshotListener(includeMetadataChanges: true) { [weak self] snapshot, error in
+            .addSnapshotListener { [weak self] snapshot, error in
                 guard let self, self.listenerGeneration == generation else { return }
                 if let error {
                     Task { @MainActor in
@@ -524,15 +577,28 @@ final class BlurbStore: ObservableObject {
                 // Dependent queries are authorized through the committed group.
                 guard let snapshot, !snapshot.metadata.hasPendingWrites else { return }
                 let groups = snapshot.documents.compactMap(Self.makeGroup)
+                    .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
                 Task { @MainActor in
                     guard self.listenerGeneration == generation else { return }
                     self.clearListenerError(source: "groups")
-                    self.groups = groups.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+                    let groupsChanged = self.groups != groups
+                    if groupsChanged {
+                        self.groups = groups
+                    }
                     self.groupsLoaded = true
                     if self.selectedGroupID == nil || !groups.contains(where: { $0.id == self.selectedGroupID }) {
                         self.selectedGroupID = groups.first?.id
                     }
+                    guard groupsChanged else { return }
                     self.listenForPosts()
+                    self.refreshNewsletterProgressListeners(for: .now, force: true)
+                    self.loreListener?.remove(); self.loreListener = nil
+                    self.timeCapsuleListener?.remove(); self.timeCapsuleListener = nil
+                    self.loreItems = []
+                    self.timeCapsules = []
+                    if let selected = groups.first(where: { $0.id == self.selectedGroupID }), selected.isPremium {
+                        self.listenForPremiumContent(in: selected.id)
+                    }
                     if let promptID = self.activeAnswerCountPromptID {
                         self.listenForAnswerCounts(promptID: promptID)
                     }
@@ -593,7 +659,10 @@ final class BlurbStore: ObservableObject {
                 let editions = snapshot?.documents.compactMap(Self.makeNewsletterEdition) ?? []
                 Task { @MainActor in
                     self.clearListenerError(source: "newsletter-editions")
-                    self.newsletterEditions = editions.sorted { $0.monthKey > $1.monthKey }
+                    let sortedEditions = editions.sorted { $0.monthKey > $1.monthKey }
+                    if self.newsletterEditions != sortedEditions {
+                        self.newsletterEditions = sortedEditions
+                    }
                 }
             }
 
@@ -629,6 +698,12 @@ final class BlurbStore: ObservableObject {
         newsletterListener?.remove(); newsletterListener = nil
         photoOfMonthListener?.remove(); photoOfMonthListener = nil
         songOfMonthListener?.remove(); songOfMonthListener = nil
+        customNewsletterQuestionListeners.values.forEach { $0.remove() }
+        customNewsletterQuestionListeners = [:]
+        newsletterAnswerListeners.values.forEach { $0.remove() }
+        newsletterAnswerListeners = [:]
+        loreListener?.remove(); loreListener = nil
+        timeCapsuleListener?.remove(); timeCapsuleListener = nil
         answerCountListeners.values.forEach { $0.remove() }
         answerCountListeners = [:]
         commentListeners.values.forEach { $0.remove() }
@@ -644,10 +719,88 @@ final class BlurbStore: ObservableObject {
         profile = BlurbProfile()
         profileLoaded = false
         needsProfileSetup = false
-        groups = []; groupsLoaded = false; posts = []; unfilteredPosts = []; answerCountsByGroup = [:]; answeringMemberIDsByGroup = [:]; myAnswerStatusByGroup = [:]; commentsByPostID = [:]; unfilteredCommentsByPostID = [:]; blockedUsers = []; newsletterEditions = []; photoOfMonthSelections = [:]; photoOfMonthSelectionsLoaded = false; songOfMonthSelections = [:]; selectedGroupID = nil
+        groups = []; groupsLoaded = false; posts = []; unfilteredPosts = []; answerCountsByGroup = [:]; answeringMemberIDsByGroup = [:]; myAnswerStatusByGroup = [:]; commentsByPostID = [:]; unfilteredCommentsByPostID = [:]; blockedUsers = []; newsletterEditions = []; photoOfMonthSelections = [:]; photoOfMonthSelectionsLoaded = false; songOfMonthSelections = [:]; customNewsletterQuestionsByGroup = [:]; newsletterAnswerPromptIDsByGroup = [:]; loreItems = []; timeCapsules = []; selectedGroupID = nil
         errorMessage = nil
         listenerErrors = [:]
         listenerErrorMessage = nil
+    }
+
+    func refreshNewsletterProgressListeners(for date: Date = .now, force: Bool = false) {
+#if DEBUG
+        if isAppStoreScreenshotFixture { return }
+#endif
+        guard let userID = currentUserID else { return }
+        let monthKey = Self.photoMonthKey(date: date)
+        let expectedGroupIDs = Set(groups.map(\.id))
+        let listeningGroupIDs = Set(customNewsletterQuestionListeners.keys)
+        guard force || expectedGroupIDs != listeningGroupIDs else { return }
+
+        customNewsletterQuestionListeners.values.forEach { $0.remove() }
+        newsletterAnswerListeners.values.forEach { $0.remove() }
+        customNewsletterQuestionListeners = [:]
+        newsletterAnswerListeners = [:]
+        customNewsletterQuestionsByGroup = customNewsletterQuestionsByGroup.filter { expectedGroupIDs.contains($0.key) }
+        newsletterAnswerPromptIDsByGroup = newsletterAnswerPromptIDsByGroup.filter { expectedGroupIDs.contains($0.key) }
+        let generation = listenerGeneration
+
+        for group in groups {
+            customNewsletterQuestionListeners[group.id] = database.collection("groups").document(group.id)
+                .collection("newsletterQuestions")
+                .whereField("monthKey", isEqualTo: monthKey)
+                .addSnapshotListener { [weak self] snapshot, error in
+                    guard let self, self.listenerGeneration == generation else { return }
+                    Task { @MainActor in
+                        guard self.listenerGeneration == generation else { return }
+                        if let error {
+                            self.recordListenerError(error, source: "newsletter-questions-\(group.id)")
+                            return
+                        }
+                        let questions = (snapshot?.documents ?? []).compactMap { document -> GroupNewsletterQuestion? in
+                            let data = document.data()
+                            guard let question = data["question"] as? String,
+                                  let authorID = data["authorID"] as? String else { return nil }
+                            return GroupNewsletterQuestion(
+                                id: document.documentID,
+                                groupID: group.id,
+                                monthKey: data["monthKey"] as? String ?? monthKey,
+                                promptID: data["promptID"] as? String
+                                    ?? "newsletter-custom-\(monthKey)-\(document.documentID)",
+                                question: question,
+                                authorID: authorID,
+                                authorName: data["authorName"] as? String ?? "A group member",
+                                createdAt: (data["createdAt"] as? Timestamp)?.dateValue() ?? .now
+                            )
+                        }
+                        .sorted {
+                            if $0.createdAt == $1.createdAt { return $0.id < $1.id }
+                            return $0.createdAt < $1.createdAt
+                        }
+                        self.customNewsletterQuestionsByGroup[group.id] = questions
+                        self.clearListenerError(source: "newsletter-questions-\(group.id)")
+                    }
+                }
+
+            newsletterAnswerListeners[group.id] = database.collection("posts")
+                .whereField("groupID", isEqualTo: group.id)
+                .whereField("authorID", isEqualTo: userID)
+                .addSnapshotListener { [weak self] snapshot, error in
+                    guard let self, self.listenerGeneration == generation else { return }
+                    Task { @MainActor in
+                        guard self.listenerGeneration == generation else { return }
+                        if let error {
+                            self.recordListenerError(error, source: "newsletter-answers-\(group.id)")
+                            return
+                        }
+                        self.newsletterAnswerPromptIDsByGroup[group.id] = Set(
+                            (snapshot?.documents ?? []).compactMap { document in
+                                let promptID = document.data()["promptID"] as? String
+                                return promptID?.hasPrefix("newsletter-") == true ? promptID : nil
+                            }
+                        )
+                        self.clearListenerError(source: "newsletter-answers-\(group.id)")
+                    }
+                }
+        }
     }
 
     func listenForAnswerCounts(promptID: String) {
@@ -812,6 +965,13 @@ final class BlurbStore: ObservableObject {
     func select(_ group: BlurbGroup) {
         selectedGroupID = group.id
         listenForPosts()
+        loreListener?.remove(); loreListener = nil
+        timeCapsuleListener?.remove(); timeCapsuleListener = nil
+        loreItems = []
+        timeCapsules = []
+        if group.isPremium {
+            listenForPremiumContent(in: group.id)
+        }
     }
 
     func createGroup(named rawName: String, isExample: Bool = false) async -> Bool {
@@ -1126,6 +1286,99 @@ final class BlurbStore: ObservableObject {
             try await database.collection("posts").document(post.id).updateData(["likeIDs": fieldValue])
         } catch {
             errorMessage = error.localizedDescription
+        }
+    }
+
+    func isSavedToLore(_ post: BlurbPost) -> Bool {
+        loreItems.contains { $0.postID == post.id }
+    }
+
+    func toggleLore(_ post: BlurbPost) async -> Bool {
+        guard let userID = currentUserID,
+              let group = groups.first(where: { $0.id == post.groupID }),
+              group.isPremium else {
+            errorMessage = "Group Lore is a Premium feature."
+            return false
+        }
+        let reference = database.collection("groups").document(post.groupID)
+            .collection("lore").document(post.id)
+        do {
+            if isSavedToLore(post) {
+                try await reference.delete()
+            } else {
+                try await reference.setData([
+                    "groupID": post.groupID,
+                    "postID": post.id,
+                    "authorName": post.authorName,
+                    "authorPhotoURL": post.authorPhotoURL ?? NSNull(),
+                    "prompt": post.prompt,
+                    "answer": post.answer,
+                    "imageURL": post.imageURL ?? NSNull(),
+                    "savedByID": userID,
+                    "createdAt": FieldValue.serverTimestamp()
+                ])
+            }
+            return true
+        } catch {
+            errorMessage = error.localizedDescription
+            return false
+        }
+    }
+
+    func createTimeCapsule(kind: String, title: String, content: String, unlockAt: Date, in groupID: String) async -> Bool {
+        do {
+            _ = try await Functions.functions().httpsCallable("createTimeCapsule").call([
+                "groupID": groupID,
+                "kind": kind,
+                "title": title,
+                "content": content,
+                "unlockAt": unlockAt.timeIntervalSince1970 * 1_000
+            ])
+            return true
+        } catch {
+            errorMessage = error.localizedDescription
+            return false
+        }
+    }
+
+    func openTimeCapsule(_ capsule: TimeCapsule) async -> String? {
+        do {
+            let result = try await Functions.functions().httpsCallable("openTimeCapsule").call([
+                "groupID": capsule.groupID,
+                "capsuleID": capsule.id
+            ])
+            return (result.data as? [String: Any])?["content"] as? String
+        } catch {
+            errorMessage = error.localizedDescription
+            return nil
+        }
+    }
+
+    func setTheme(_ theme: GroupTheme, for groupID: String) async -> Bool {
+        do {
+            _ = try await Functions.functions().httpsCallable("setGroupTheme").call([
+                "groupID": groupID,
+                "themeID": theme.rawValue
+            ])
+            return true
+        } catch {
+            errorMessage = error.localizedDescription
+            return false
+        }
+    }
+
+    @discardableResult
+    func ensurePreviousNewsletter(in groupID: String) async -> Bool {
+        do {
+            _ = try await Functions.functions().httpsCallable("ensurePreviousNewsletter").call([
+                "groupID": groupID
+            ])
+            return true
+        } catch {
+#if DEBUG
+            print("Could not ensure previous newsletter:", error.localizedDescription)
+#endif
+            return false
         }
     }
 
@@ -1537,7 +1790,7 @@ final class BlurbStore: ObservableObject {
         let generation = listenerGeneration
         postsListener = database.collection("posts")
             .whereField("groupID", isEqualTo: groupID)
-            .addSnapshotListener(includeMetadataChanges: true) { [weak self] snapshot, error in
+            .addSnapshotListener { [weak self] snapshot, error in
                 guard let self, self.listenerGeneration == generation else { return }
                 if let error {
                     Task { @MainActor in
@@ -1554,6 +1807,7 @@ final class BlurbStore: ObservableObject {
                 Task { @MainActor in
                     guard self.listenerGeneration == generation else { return }
                     self.clearListenerError(source: "posts")
+                    guard self.unfilteredPosts != posts else { return }
                     self.unfilteredPosts = posts
                     self.applyBlockedContentFilter()
                 }
@@ -1625,18 +1879,112 @@ final class BlurbStore: ObservableObject {
         listenerErrorMessage = listenerErrors.values.first
     }
 
+    private func listenForPremiumContent(in groupID: String) {
+#if DEBUG
+        if isAppStoreScreenshotFixture { return }
+#endif
+        loreListener?.remove()
+        timeCapsuleListener?.remove()
+        loreItems = []
+        timeCapsules = []
+        let generation = listenerGeneration
+        loreListener = database.collection("groups").document(groupID).collection("lore")
+            .order(by: "createdAt", descending: true)
+            .addSnapshotListener { [weak self] snapshot, error in
+                guard let self, self.listenerGeneration == generation else { return }
+                if let error {
+                    // Premium collections can briefly be unavailable while a
+                    // new ruleset is rolling out. Keep the main feed usable;
+                    // the feature screen can remain empty until access returns.
+                    print("Group Lore listener unavailable: \(error.localizedDescription)")
+                    return
+                }
+                let items = (snapshot?.documents ?? []).compactMap { document -> GroupLoreItem? in
+                    let data = document.data()
+                    guard let postID = data["postID"] as? String,
+                          let authorName = data["authorName"] as? String,
+                          let prompt = data["prompt"] as? String,
+                          let answer = data["answer"] as? String,
+                          let savedByID = data["savedByID"] as? String else { return nil }
+                    return GroupLoreItem(
+                        id: document.documentID,
+                        groupID: groupID,
+                        postID: postID,
+                        authorName: authorName,
+                        authorPhotoURL: data["authorPhotoURL"] as? String,
+                        prompt: prompt,
+                        answer: answer,
+                        imageURL: data["imageURL"] as? String,
+                        savedByID: savedByID,
+                        createdAt: (data["createdAt"] as? Timestamp)?.dateValue() ?? .now
+                    )
+                }
+                Task { @MainActor in
+                    self.clearListenerError(source: "lore")
+                    self.loreItems = items
+                }
+            }
+
+        timeCapsuleListener = database.collection("groups").document(groupID).collection("timeCapsules")
+            .order(by: "unlockAt")
+            .addSnapshotListener { [weak self] snapshot, error in
+                guard let self, self.listenerGeneration == generation else { return }
+                if let error {
+                    print("Time Capsule listener unavailable: \(error.localizedDescription)")
+                    return
+                }
+                let capsules = (snapshot?.documents ?? []).compactMap { document -> TimeCapsule? in
+                    let data = document.data()
+                    guard let kind = data["kind"] as? String,
+                          let title = data["title"] as? String,
+                          let creatorID = data["creatorID"] as? String,
+                          let creatorName = data["creatorName"] as? String,
+                          let unlockAt = data["unlockAt"] as? Timestamp else { return nil }
+                    return TimeCapsule(
+                        id: document.documentID,
+                        groupID: groupID,
+                        kind: kind,
+                        title: title,
+                        creatorID: creatorID,
+                        creatorName: creatorName,
+                        unlockAt: unlockAt.dateValue(),
+                        createdAt: (data["createdAt"] as? Timestamp)?.dateValue() ?? .now
+                    )
+                }
+                Task { @MainActor in
+                    self.clearListenerError(source: "time-capsules")
+                    self.timeCapsules = capsules
+                }
+            }
+    }
+
     private static func makeGroup(_ document: QueryDocumentSnapshot) -> BlurbGroup? {
         let data = document.data()
         guard let name = data["name"] as? String,
               let ownerID = data["ownerID"] as? String,
               let memberIDs = data["memberIDs"] as? [String] else { return nil }
+        let premiumData = data["premium"] as? [String: Any]
+        let premium: GroupPremiumEntitlement? = {
+            guard let premiumData,
+                  let productID = premiumData["productID"] as? String,
+                  let sponsorID = premiumData["sponsorID"] as? String,
+                  let expiresAt = premiumData["expiresAt"] as? Timestamp else { return nil }
+            return GroupPremiumEntitlement(
+                productID: productID,
+                sponsorID: sponsorID,
+                expiresAt: expiresAt.dateValue(),
+                status: premiumData["status"] as? String ?? "inactive"
+            )
+        }()
         return BlurbGroup(
             id: document.documentID,
             name: name,
             ownerID: ownerID,
             memberIDs: memberIDs,
             inviteCode: data["inviteCode"] as? String ?? inviteCode(for: document.documentID),
-            isExample: data["isExample"] as? Bool ?? false
+            isExample: data["isExample"] as? Bool ?? false,
+            premium: premium,
+            themeID: data["themeID"] as? String ?? GroupTheme.gold.rawValue
         )
     }
 

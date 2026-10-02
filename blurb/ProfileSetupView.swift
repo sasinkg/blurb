@@ -5,35 +5,118 @@ import UIKit
 struct SignedInRootView: View {
     @EnvironmentObject private var auth: AuthManager
     @EnvironmentObject private var blurbStore: BlurbStore
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var minimumLaunchTimeElapsed = false
+
+    private var isPreparingApp: Bool {
+        !minimumLaunchTimeElapsed
+            || !blurbStore.profileLoaded
+            || (blurbStore.profileLoaded && !blurbStore.needsProfileSetup && !blurbStore.groupsLoaded)
+    }
 
     var body: some View {
-        Group {
-            if !blurbStore.profileLoaded {
-                VStack(spacing: 20) {
-                    if let message = blurbStore.listenerErrorMessage ?? auth.errorMessage {
-                        Text(message).multilineTextAlignment(.center)
-                        Button("Try again") {
-                            blurbStore.stop()
-                            Task { await loadProfile() }
-                        }
-                        Button("Sign out") { auth.signOut() }
-                    } else {
-                        ProgressView("Loading your profile…")
-                    }
-                }
-                .padding()
+        ZStack {
+            if isPreparingApp {
+                BlurbLaunchView(
+                    errorMessage: blurbStore.listenerErrorMessage ?? auth.errorMessage,
+                    retry: {
+                        blurbStore.stop()
+                        Task { await loadProfile() }
+                    },
+                    signOut: auth.signOut
+                )
+                .transition(.opacity)
             } else if blurbStore.needsProfileSetup {
                 ProfileSetupView()
+                    .transition(.opacity)
             } else {
                 ContentView()
+                    .transition(.opacity)
             }
         }
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.65), value: isPreparingApp)
         .task(id: auth.user?.uid) { await loadProfile() }
+        .task(id: auth.user?.uid) {
+            minimumLaunchTimeElapsed = reduceMotion
+            guard !reduceMotion else { return }
+            try? await Task.sleep(for: .milliseconds(1_250))
+            guard !Task.isCancelled else { return }
+            minimumLaunchTimeElapsed = true
+        }
     }
 
     private func loadProfile() async {
         guard let userID = auth.user?.uid, await auth.refreshSession() else { return }
         blurbStore.start(for: userID)
+    }
+}
+
+private struct BlurbLaunchView: View {
+    let errorMessage: String?
+    let retry: () -> Void
+    let signOut: () -> Void
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var hasAppeared = false
+    @State private var detailsVisible = false
+
+    var body: some View {
+        ZStack {
+            Color(uiColor: .systemBackground)
+                .ignoresSafeArea()
+
+            VStack(spacing: 20) {
+                Image("DailyBlurbLogo")
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 104, height: 104)
+                    .clipShape(RoundedRectangle(cornerRadius: 23, style: .continuous))
+                    .shadow(color: .black.opacity(0.08), radius: 12, y: 5)
+                    .scaleEffect(hasAppeared || reduceMotion ? 1 : 0.94)
+                    .opacity(hasAppeared || reduceMotion ? 1 : 0)
+
+                Text("DAILY BLURB")
+                    .font(.system(size: 30, weight: .black, design: .serif))
+                    .tracking(2)
+                    .offset(y: detailsVisible || reduceMotion ? 0 : 6)
+                    .opacity(detailsVisible || reduceMotion ? 1 : 0)
+
+                if let errorMessage {
+                    VStack(spacing: 12) {
+                        Text(errorMessage)
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                        Button("Try again", action: retry)
+                            .buttonStyle(.borderedProminent)
+                            .tint(Color(red: 1, green: 0.78, blue: 0.02))
+                            .foregroundStyle(.black)
+                        Button("Sign out", action: signOut)
+                            .font(.subheadline)
+                    }
+                    .frame(maxWidth: 300)
+                } else {
+                    ProgressView()
+                        .tint(.secondary)
+                        .opacity(detailsVisible || reduceMotion ? 1 : 0)
+                        .accessibilityLabel("Opening Daily Blurb")
+                }
+            }
+            .padding(28)
+        }
+        .onAppear {
+            guard !reduceMotion else {
+                hasAppeared = true
+                detailsVisible = true
+                return
+            }
+            withAnimation(.easeInOut(duration: 0.82)) {
+                hasAppeared = true
+            }
+            withAnimation(.easeOut(duration: 0.72).delay(0.18)) {
+                detailsVisible = true
+            }
+        }
     }
 }
 

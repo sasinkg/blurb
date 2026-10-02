@@ -20,6 +20,12 @@ service cloud.firestore {
         && get(/databases/$(database)/documents/groups/$(groupID)).data.ownerID == request.auth.uid;
     }
 
+    function isPremiumGroup(groupID) {
+      return exists(/databases/$(database)/documents/groups/$(groupID))
+        && get(/databases/$(database)/documents/groups/$(groupID)).data.premium.status == 'active'
+        && get(/databases/$(database)/documents/groups/$(groupID)).data.premium.expiresAt > request.time;
+    }
+
     function hasValidCityLocation(data) {
       return !('cityLocation' in data) || (
         data.cityLocation is map
@@ -75,7 +81,10 @@ service cloud.firestore {
         && request.resource.data.memberIDs.size() == 1
         && request.auth.uid in request.resource.data.memberIDs;
       allow update: if signedIn() && (
-        request.auth.uid == resource.data.ownerID
+        (
+          request.auth.uid == resource.data.ownerID
+          && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['premium', 'themeID'])
+        )
         || (
           request.resource.data.diff(resource.data).affectedKeys().hasOnly(['memberIDs'])
           && !(request.auth.uid in resource.data.memberIDs)
@@ -118,6 +127,25 @@ service cloud.firestore {
         // Questions are immutable so answers already written for a prompt can
         // never silently change or become detached from their newsletter.
         allow update, delete: if false;
+      }
+
+      match /lore/{loreID} {
+        allow read: if isGroupMember(groupID) && isPremiumGroup(groupID);
+        allow create: if isGroupMember(groupID)
+          && isPremiumGroup(groupID)
+          && request.resource.data.groupID == groupID
+          && request.resource.data.savedByID == request.auth.uid
+          && request.resource.data.answer is string
+          && request.resource.data.answer.size() <= 5000;
+        allow update: if false;
+        allow delete: if isPremiumGroup(groupID) && (
+          request.auth.uid == resource.data.savedByID || isGroupOwner(groupID)
+        );
+      }
+
+      match /timeCapsules/{capsuleID} {
+        allow read: if isGroupMember(groupID) && isPremiumGroup(groupID);
+        allow write: if false;
       }
     }
 
@@ -214,6 +242,15 @@ service cloud.firestore {
     match /newsletterEditions/{editionID} {
       allow read: if signedIn() && request.auth.uid in resource.data.viewerIDs;
       allow write: if false;
+    }
+
+    match /premiumTransactions/{transactionID} {
+      allow read, write: if false;
+    }
+
+    match /premiumTimeCapsuleContents/{contentID} {
+      // Sealed contents are returned only by a trusted callable after unlock.
+      allow read, write: if false;
     }
 
     match /reports/{reportID} {
