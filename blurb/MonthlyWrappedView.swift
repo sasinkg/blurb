@@ -21,29 +21,33 @@ struct MonthlyWrappedView: View {
     }
 
     private var slides: [WrappedSlide] {
-        var result: [WrappedSlide] = [.intro]
-        let stats = edition.stats
-        if stats.answerCount > 0 { result.append(.stats) }
-        if let winner = edition.mostAnswersWinner { result.append(.winner("Most questions answered", winner, "checkmark.circle.fill")) }
-        if let winner = edition.mostPointsWinner { result.append(.winner("Most points won", winner, "star.fill")) }
-        if let item = stats.mostLiked, item.value > 0 { result.append(.highlight("Most liked", item, "heart.fill")) }
-        if let item = stats.mostCommented, item.value > 0 { result.append(.highlight("Most discussed", item, "bubble.left.and.bubble.right.fill")) }
-        if !stats.cities.isEmpty { result.append(.locations(stats.cities)) }
+        var result: [WrappedSlide] = [.intro, .stats, .locations(edition.stats.cities)]
         let answers = edition.entries.filter { $0.imageURL == nil && !$0.answer.isEmpty }
         let questions = Dictionary(grouping: answers, by: \.promptID).values
-            .compactMap { responses -> (NewsletterEntry, [NewsletterEntry])? in
+            .compactMap { responses -> (promptID: String, prompt: String, responses: [NewsletterEntry], createdAt: Date)? in
                 guard let first = responses.min(by: { $0.createdAt < $1.createdAt }) else { return nil }
-                return (first, responses.sorted { $0.authorName < $1.authorName })
+                return (
+                    first.promptID,
+                    first.prompt,
+                    responses.sorted { $0.authorName < $1.authorName },
+                    first.createdAt
+                )
             }
-            .sorted { $0.0.createdAt < $1.0.createdAt }
-        result.append(contentsOf: questions.map { .question($0.0.prompt, $0.1) })
+        let officialQuestions = questions
+            .filter { !$0.promptID.hasPrefix("newsletter-custom-") }
+            .sorted { $0.promptID.localizedStandardCompare($1.promptID) == .orderedAscending }
+        let customQuestions = questions
+            .filter { $0.promptID.hasPrefix("newsletter-custom-") }
+            .sorted { $0.createdAt < $1.createdAt }
+        result.append(contentsOf: officialQuestions.map { .question($0.prompt, $0.responses) })
         let photoGroups = Dictionary(grouping: edition.entries.filter { $0.imageURL != nil }, by: \.promptID)
             .values.sorted { ($0.first?.createdAt ?? .now) < ($1.first?.createdAt ?? .now) }
         result.append(contentsOf: photoGroups.compactMap { entries in
             guard let title = entries.first?.prompt else { return nil }
             return .photoGroup(title, entries.sorted { $0.authorName < $1.authorName })
         })
-        result.append(.final)
+        result.append(contentsOf: customQuestions.map { .question($0.prompt, $0.responses) })
+        result.append(contentsOf: [.awards, .final])
         return result
     }
 
@@ -156,17 +160,6 @@ struct MonthlyWrappedView: View {
                 Text("The month in numbers").font(.system(size: 38, weight: .black, design: .serif))
                 HStack { stat(edition.stats.answerCount, "answers"); stat(edition.stats.questionCount, "questions") }
                 HStack { stat(edition.stats.photoCount, "photos"); stat(edition.stats.participatingMemberCount, "people") }
-            case let .highlight(title, item, icon):
-                Image(systemName: icon).font(.system(size: 46)).foregroundStyle(.black).padding(14).background(accent)
-                sectionLabel(title.uppercased())
-                Text("“\(item.answer)”").font(.system(size: 30, weight: .semibold, design: .serif)).multilineTextAlignment(.center)
-                Text("BY \(item.authorName.uppercased()) · \(item.value)").font(.caption.weight(.black)).tracking(1)
-            case let .winner(title, name, icon):
-                Image(systemName: icon).font(.system(size: 54)).padding(16).background(accent)
-                sectionLabel("MONTHLY WINNER")
-                Text(title).font(.system(size: 30, weight: .bold, design: .serif)).multilineTextAlignment(.center)
-                Rectangle().frame(height: 3)
-                Text(name.uppercased()).font(.system(size: 45, weight: .black, design: .serif)).multilineTextAlignment(.center)
             case let .question(prompt, responses):
                 sectionLabel("THE MONTH IN WORDS")
                 Text(prompt).font(.system(size: 27, weight: .bold, design: .serif)).multilineTextAlignment(.center)
@@ -216,8 +209,51 @@ struct MonthlyWrappedView: View {
             case let .locations(cities):
                 sectionLabel("BLURB MAP")
                 Text("Where the group posted from").font(.system(size: 30, weight: .black, design: .serif)).multilineTextAlignment(.center)
-                ScrollView {
+                if cities.isEmpty {
+                    Spacer()
+                    Image(systemName: "map")
+                        .font(.system(size: 52, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    Text("No locations were shared this month.")
+                        .font(.system(.title3, design: .serif))
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                    Spacer()
+                } else {
                     MonthlyCityMap(cities: cities, interactive: false, accent: accent)
+                }
+            case .awards:
+                sectionLabel("MONTHLY HONORS")
+                Text("The month’s standouts")
+                    .font(.system(size: 30, weight: .black, design: .serif))
+                    .multilineTextAlignment(.center)
+                ScrollView {
+                    VStack(spacing: 10) {
+                        awardRow(
+                            icon: "checkmark.circle.fill",
+                            title: "MOST QUESTIONS ANSWERED",
+                            name: edition.mostAnswersWinner,
+                            detail: edition.mostAnswersWinner == nil ? "No answers this month" : nil
+                        )
+                        awardRow(
+                            icon: "star.fill",
+                            title: "MOST POINTS WON",
+                            name: edition.mostPointsWinner,
+                            detail: edition.mostPointsWinner == nil ? "No points awarded this month" : nil
+                        )
+                        awardRow(
+                            icon: "heart.fill",
+                            title: "MOST LIKED",
+                            name: edition.stats.mostLiked?.authorName,
+                            detail: highlightDetail(edition.stats.mostLiked, activity: "likes")
+                        )
+                        awardRow(
+                            icon: "bubble.left.and.bubble.right.fill",
+                            title: "MOST DISCUSSED",
+                            name: edition.stats.mostCommented?.authorName,
+                            detail: highlightDetail(edition.stats.mostCommented, activity: "replies")
+                        )
+                    }
                 }
             case .final:
                 WrappedNewspaperPage(
@@ -240,6 +276,37 @@ struct MonthlyWrappedView: View {
     private func stat(_ value: Int, _ label: String) -> some View {
         VStack { Text("\(value)").font(.system(size: 48, weight: .black)); Text(label.uppercased()).font(.caption.bold()) }
             .frame(maxWidth: .infinity).padding().background(Color.white.opacity(0.38)).overlay { Rectangle().stroke(.black, lineWidth: 1.5) }
+    }
+
+    private func highlightDetail(_ item: WrappedHighlight?, activity: String) -> String? {
+        guard let item, item.value > 0 else { return "No \(activity) this month" }
+        return "\(item.value) \(activity) · “\(item.answer)”"
+    }
+
+    private func awardRow(icon: String, title: String, name: String?, detail: String?) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: icon)
+                .font(.title3)
+                .frame(width: 38, height: 38)
+                .background(accent)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.system(size: 9, weight: .black))
+                    .tracking(0.8)
+                Text((name ?? "—").uppercased())
+                    .font(.system(.headline, design: .serif).weight(.black))
+                if let detail {
+                    Text(detail)
+                        .font(.system(.caption, design: .serif))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(10)
+        .overlay { Rectangle().stroke(.black, lineWidth: 1.5) }
     }
 
     private func exportPDF() {
@@ -471,7 +538,7 @@ private struct WrappedShareImage: Transferable {
 }
 
 private enum WrappedSlide {
-    case intro, stats, winner(String, String, String), highlight(String, WrappedHighlight, String), question(String, [NewsletterEntry]), photoGroup(String, [NewsletterEntry]), locations([WrappedCityCount]), final
+    case intro, stats, locations([WrappedCityCount]), question(String, [NewsletterEntry]), photoGroup(String, [NewsletterEntry]), awards, final
 }
 
 enum MonthlyWrappedDemo {

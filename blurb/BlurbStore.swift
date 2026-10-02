@@ -108,6 +108,10 @@ struct BlurbPost: Identifiable, Hashable {
     var isSample = false
 
     var likeCount: Int { likeIDs.count }
+    var totalPoints: Int {
+        guard !isMonthlyReportPrompt, !promptID.hasPrefix("newsletter-") else { return 0 }
+        return pointsAwarded + likeCount
+    }
     var effectivePostedAt: Date { editedAt ?? createdAt }
     var placementLabel: String? {
         switch answerRank {
@@ -174,6 +178,7 @@ struct NewsletterEdition: Identifiable, Hashable {
     let mostAnswersWinner: String?
     let mostPointsWinner: String?
     var stats: MonthlyWrappedStats = .empty
+    var scoringVersion: Int = 1
 }
 
 struct MonthlyWrappedStats: Hashable {
@@ -535,18 +540,36 @@ final class BlurbStore: ObservableObject {
     var currentMonthPoints: Int {
         guard let userID = currentUserID else { return 0 }
         let calendar = Calendar.current
-        return posts
-            .filter { $0.authorID == userID && calendar.isDate($0.createdAt, equalTo: .now, toGranularity: .month) }
-            .reduce(0) { $0 + $1.pointsAwarded }
+        let monthPosts = posts.filter {
+            !$0.promptID.hasPrefix("newsletter-")
+                && calendar.isDate($0.createdAt, equalTo: .now, toGranularity: .month)
+        }
+        let answerPoints = monthPosts
+            .filter { $0.authorID == userID }
+            .reduce(0) { $0 + $1.totalPoints }
+        let replyPoints = monthPosts.reduce(0) { total, post in
+            total + (commentsByPostID[post.id] ?? [])
+                .filter { $0.authorID == userID }
+                .reduce(0) { $0 + $1.likeIDs.count }
+        }
+        return answerPoints + replyPoints
     }
 
     var lastMonthWinner: MonthlyWinner? {
         guard let userID = currentUserID else { return nil }
         let calendar = Calendar.current
         guard let lastMonth = calendar.date(byAdding: .month, value: -1, to: .now) else { return nil }
-        let lastMonthPosts = posts.filter { calendar.isDate($0.createdAt, equalTo: lastMonth, toGranularity: .month) }
-        let totals = Dictionary(grouping: lastMonthPosts, by: \.authorID)
-            .mapValues { $0.reduce(0) { $0 + $1.pointsAwarded } }
+        let lastMonthPosts = posts.filter {
+            !$0.promptID.hasPrefix("newsletter-")
+                && calendar.isDate($0.createdAt, equalTo: lastMonth, toGranularity: .month)
+        }
+        var totals = Dictionary(grouping: lastMonthPosts, by: \.authorID)
+            .mapValues { $0.reduce(0) { $0 + $1.totalPoints } }
+        for post in lastMonthPosts {
+            for comment in commentsByPostID[post.id] ?? [] {
+                totals[comment.authorID, default: 0] += comment.likeIDs.count
+            }
+        }
         guard let highestScore = totals.values.max(),
               totals[userID] == highestScore,
               highestScore > 0 else { return nil }
@@ -2130,7 +2153,8 @@ final class BlurbStore: ObservableObject {
                 participatingMemberCount: stats["participatingMemberCount"] as? Int ?? 0,
                 groupMemberCount: stats["groupMemberCount"] as? Int ?? 0,
                 mostLiked: highlight("mostLiked"), mostCommented: highlight("mostCommented"), cities: cities
-            )
+            ),
+            scoringVersion: data["scoringVersion"] as? Int ?? 1
         )
     }
 

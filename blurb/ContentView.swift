@@ -464,13 +464,13 @@ struct ContentView: View {
 
     private var missingPreviousReportGroupIDs: String {
         guard blurbStore.groupsLoaded else { return "" }
-        let groupsWithReport = Set(
+        let groupsWithCurrentReport = Set(
             blurbStore.newsletterEditions
-                .filter { $0.monthKey == previousNewsletterMonthKey }
+                .filter { $0.monthKey == previousNewsletterMonthKey && $0.scoringVersion >= 2 }
                 .map(\.groupID)
         )
         return blurbStore.groups
-            .filter { !$0.isExample && !groupsWithReport.contains($0.id) }
+            .filter { !$0.isExample && !groupsWithCurrentReport.contains($0.id) }
             .map(\.id)
             .sorted()
             .joined(separator: ",")
@@ -2772,7 +2772,7 @@ private struct TodayAnswerCard: View {
                     .font(.caption.bold())
                     .tracking(0.8)
                 Spacer()
-                Text("+\(answer.pointsAwarded) pts")
+                Text("+\(answer.totalPoints) pts")
                     .font(.caption.bold())
             }
             .foregroundStyle(.primary)
@@ -3980,7 +3980,7 @@ private struct QuestionRulesView: View {
                         rule(
                             icon: "sun.max.fill",
                             title: "Every day — Daily Blurb",
-                            text: "One shared daily question appears at 5:00 AM Pacific. Answer it separately in each group to unlock that group’s conversation. Daily answers can earn placement points and streak credit."
+                            text: "One shared daily question appears at 5:00 AM Pacific. Answer it separately in each group to unlock that group’s conversation. Daily answers can earn placement points and streak credit. Every like on a Daily answer or reply adds one point to its author."
                         )
                         rule(
                             icon: "brain.head.profile",

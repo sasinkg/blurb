@@ -51,8 +51,13 @@ struct GroupNewsletterHomeView: View {
                 )
             }
         let counts = Dictionary(grouping: currentPosts, by: \.authorName).mapValues(\.count)
-        let points = Dictionary(grouping: currentPosts, by: \.authorName)
-            .mapValues { $0.reduce(0) { $0 + $1.pointsAwarded } }
+        var points = Dictionary(grouping: currentPosts, by: \.authorName)
+            .mapValues { $0.reduce(0) { $0 + $1.totalPoints } }
+        for post in currentPosts where !post.promptID.hasPrefix("newsletter-") {
+            for comment in blurbStore.commentsByPostID[post.id] ?? [] {
+                points[comment.authorName, default: 0] += comment.likeIDs.count
+            }
+        }
         let components = calendar.dateComponents([.year, .month], from: .now)
         let monthKey = String(format: "%04d-%02d", components.year ?? 0, components.month ?? 0)
         return NewsletterEdition(

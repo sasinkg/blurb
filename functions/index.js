@@ -711,7 +711,8 @@ function previousNewsletterMonth(date = new Date()) {
 async function generateNewsletterEdition(database, groupDocument, monthKey, monthLabel) {
   const editionReference = database.collection("newsletterEditions")
       .doc(`${groupDocument.id}_${monthKey}`);
-  if ((await editionReference.get()).exists) return false;
+  const existingEdition = await editionReference.get();
+  if (existingEdition.exists && (existingEdition.data()?.scoringVersion ?? 1) >= 2) return false;
 
   const group = groupDocument.data();
   const postsSnapshot = await database.collection("posts")
@@ -740,14 +741,24 @@ async function generateNewsletterEdition(database, groupDocument, monthKey, mont
     const cityLocation = normalizeCityLocation(post.cityLocation);
     if (!isNewsletterQuestion) {
       if (cityLocation) cityLocations.push(cityLocation);
-      totals[post.authorName] = (totals[post.authorName] ?? 0) + (post.pointsAwarded ?? 0);
+      const responseLikes = Array.isArray(post.likeIDs) ? post.likeIDs.length : 0;
+      totals[post.authorName] = (totals[post.authorName] ?? 0) + (post.pointsAwarded ?? 0) + responseLikes;
       counts[post.authorName] = (counts[post.authorName] ?? 0) + 1;
       if (post.imageURL) photoCount += 1;
       const summary = {postID: document.id, authorName: post.authorName, prompt: post.prompt ?? "", answer: post.answer ?? "", value: 0};
-      const likes = Array.isArray(post.likeIDs) ? post.likeIDs.length : 0;
+      const likes = responseLikes;
       const comments = post.commentCount ?? 0;
       if (!mostLiked || likes > mostLiked.value) mostLiked = {...summary, value: likes};
       if (!mostCommented || comments > mostCommented.value) mostCommented = {...summary, value: comments};
+
+      const commentsSnapshot = await document.ref.collection("comments").get();
+      for (const commentDocument of commentsSnapshot.docs) {
+        const comment = commentDocument.data();
+        const replyLikes = Array.isArray(comment.likeIDs) ? comment.likeIDs.length : 0;
+        if (replyLikes > 0 && typeof comment.authorName === "string" && comment.authorName) {
+          totals[comment.authorName] = (totals[comment.authorName] ?? 0) + replyLikes;
+        }
+      }
     } else {
       entries.push({
         postID: document.id,
@@ -802,6 +813,7 @@ async function generateNewsletterEdition(database, groupDocument, monthKey, mont
     viewerIDs: group.memberIDs ?? [],
     monthKey,
     monthLabel,
+    scoringVersion: 2,
     generatedAt: FieldValue.serverTimestamp(),
     entries,
     winners: {
