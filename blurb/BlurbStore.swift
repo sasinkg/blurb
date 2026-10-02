@@ -1822,10 +1822,15 @@ final class BlurbStore: ObservableObject {
                     }
                     return
                 }
-                // Feed cards start comment listeners for their reply previews.
-                // Do not expose a new local post until its parent is committed.
-                guard let snapshot, !snapshot.metadata.hasPendingWrites else { return }
-                let posts = snapshot.documents.compactMap(Self.makePost)
+                guard let snapshot else { return }
+                // Existing posts should reflect local likes immediately. New posts
+                // stay hidden until committed because their reply listeners require
+                // the parent document to exist on the server first.
+                let knownPostIDs = Set(self.unfilteredPosts.map(\.id))
+                let visibleDocuments = snapshot.metadata.hasPendingWrites
+                    ? snapshot.documents.filter { knownPostIDs.contains($0.documentID) }
+                    : snapshot.documents
+                let posts = visibleDocuments.compactMap(Self.makePost)
                     .sorted { $0.createdAt > $1.createdAt }
                 Task { @MainActor in
                     guard self.listenerGeneration == generation else { return }
